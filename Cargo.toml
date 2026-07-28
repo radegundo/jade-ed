@@ -4,3 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bevy = { version = "0.19", features = ["dynamic_linking", "debug", "bevy_dev_tools"] }
+bevy_egui = "0.41.1"
