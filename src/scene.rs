@@ -1,7 +1,5 @@
 use bevy::prelude::*;
 
-use crate::picking::*;
-
 pub struct ScenePlugin;
 
 impl Plugin for ScenePlugin {

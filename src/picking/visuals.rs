@@ -1,75 +1,17 @@
 use bevy::prelude::*;
 
-#[derive(Component)]
-pub struct Hovered;
-#[derive(Component)]
-pub struct Selected;
-#[derive(Component)]
-struct OriginalMaterial(Handle<StandardMaterial>);
-#[derive(Component)]
-struct HasHoverObservers;
+use crate::picking::{ Hovered, OriginalMaterial, Selected, drag::DragState };
 
-pub struct OwnPickingPlugin;
-
-impl Plugin for OwnPickingPlugin {
-    fn build(&self, app: &mut App) {
-        app.add_plugins(MeshPickingPlugin).add_systems(Update, (
-            attach_hover_observers,
-            update_visual_state,
-        ));
-    }
-}
-
-/// Attach observers to any mesh without them.
-fn attach_hover_observers(
-    mut commands: Commands,
-    query: Query<Entity, (With<Mesh3d>, Without<HasHoverObservers>)>
-) {
-    for entity in &query {
-        commands
-            .entity(entity)
-            .observe(on_hover)
-            .observe(on_unhover)
-            .observe(on_click)
-            .insert(HasHoverObservers);
-    }
-}
-
-/// Observers just toggle components — no material logic here.
-fn on_hover(trigger: On<Pointer<Over>>, mut commands: Commands) {
-    commands.entity(trigger.event_target()).insert(Hovered);
-}
-
-fn on_unhover(trigger: On<Pointer<Out>>, mut commands: Commands) {
-    commands.entity(trigger.event_target()).remove::<Hovered>();
-}
-
-fn on_click(
-    trigger: On<Pointer<Click>>,
-    mut commands: Commands,
-    selected: Query<Entity, With<Selected>>
-) {
-    // Deselect all others
-    for e in &selected {
-        commands.entity(e).remove::<Selected>();
-    }
-    commands.entity(trigger.event_target()).insert(Selected);
-}
-
-/// Central system handles all material updates based on component state.
-fn update_visual_state(
+pub fn update_visual_state(
     mut commands: Commands,
     entities: Query<(Entity, Option<&Hovered>, Option<&Selected>), With<Mesh3d>>,
     mesh_materials: Query<&MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut originals: Query<&mut OriginalMaterial>
+    originals: Query<&OriginalMaterial>
 ) {
     for (entity, hover, select) in &entities {
         let has_hover = hover.is_some();
         let has_select = select.is_some();
-
-        // Skip if state hasn't changed (optimization)
-        // ... (can use Changed filters for this)
 
         let original = if let Ok(orig) = originals.get(entity) {
             orig.0.clone()
