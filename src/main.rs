@@ -5,6 +5,7 @@ mod editor;
 mod scene;
 mod ui;
 mod viewport;
+mod picking;
 
 fn main() {
     App::new()
