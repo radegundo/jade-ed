@@ -1,5 +1,4 @@
 use bevy::{ picking::pointer::PointerInteraction, prelude::* };
-use bevy::picking::prelude::*;
 use super::state::{ PickingState, snap_to_grid };
 
 /// Compute all picking data once per frame.
