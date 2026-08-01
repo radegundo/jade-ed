@@ -1,78 +1,108 @@
 use bevy::prelude::*;
+use std::collections::HashMap;
 
-use crate::picking::{ Hovered, OriginalMaterial, Selected };
+// ── Marker Components ─────────────────────────────────────────────
 
-pub fn update_material_highlights(
+#[derive(Component)]
+pub struct Hovered;
+
+#[derive(Component)]
+pub struct Selected;
+
+#[derive(Component)]
+pub struct BeingDragged {
+    pub grab_offset: Vec3,
+    pub start_position: Vec3,
+}
+
+// ── Resource: stores original materials (avoids query conflicts) ──
+
+#[derive(Resource, Default)]
+pub struct MaterialCache {
+    pub originals: HashMap<Entity, Handle<StandardMaterial>>,
+}
+
+// ── System 1: Restore materials for unmarked entities ─────────────
+
+pub fn restore_unmarked_materials(
     mut commands: Commands,
-    entities: Query<
+    query: Query<
         Entity,
-        Or<
-            (
-                With<Hovered>,
-                With<Selected>,
-                With<super::drag::BeingDragged>,
-                Changed<Hovered>,
-                Changed<Selected>,
-            )
-        >
+        (
+            With<MeshMaterial3d<StandardMaterial>>,
+            Without<Hovered>,
+            Without<Selected>,
+            Without<BeingDragged>,
+        )
     >,
-    hovered: Query<(), With<Hovered>>,
-    selected: Query<(), With<Selected>>,
-    dragged: Query<(), With<super::drag::BeingDragged>>,
+    mut cache: ResMut<MaterialCache>
+) {
+    for entity in &query {
+        if let Some(orig) = cache.originals.remove(&entity) {
+            commands.entity(entity).insert(MeshMaterial3d(orig));
+        }
+    }
+}
+
+// ── System 2: Apply tints to marked entities ──────────────────────
+
+pub fn apply_material_tints(
+    mut commands: Commands,
+    marked: Query<
+        (Entity, Has<Hovered>, Has<Selected>, Has<BeingDragged>),
+        Or<(With<Hovered>, With<Selected>, With<BeingDragged>)>
+    >,
     mesh_materials: Query<&MeshMaterial3d<StandardMaterial>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut originals: Query<&mut OriginalMaterial>
+    mut cache: ResMut<MaterialCache>
 ) {
-    for entity in &entities {
-        let is_dragged = dragged.get(entity).is_ok();
-        let is_selected = selected.get(entity).is_ok();
-        let is_hovered = hovered.get(entity).is_ok();
-
-        // Get or store original material
-        let original = if let Ok(orig) = originals.get(entity) {
-            orig.0.clone()
-        } else if let Ok(mesh_mat) = mesh_materials.get(entity) {
-            let h = mesh_mat.0.clone();
-            commands.entity(entity).insert(OriginalMaterial(h.clone()));
-            h
-        } else {
-            continue;
-        };
-
-        // Determine tint by priority: drag > select+hover > select > hover > none
-        let tint = if is_dragged {
+    for (entity, has_hover, has_select, has_drag) in &marked {
+        let tint = if has_drag {
             Some(Color::srgb(1.0, 1.0, 0.0)) // yellow
-        } else if is_selected && is_hovered {
+        } else if has_select && has_hover {
             Some(Color::srgb(1.0, 0.7, 0.3)) // light orange
-        } else if is_selected {
+        } else if has_select {
             Some(Color::srgb(1.0, 0.5, 0.1)) // orange
-        } else if is_hovered {
+        } else if has_hover {
             Some(Color::srgb(0.5, 0.6, 1.0)) // blue
         } else {
             None
         };
 
-        if let Some(tint_color) = tint {
-            if let Some(mat) = materials.get(&original) {
-                let mut tinted = mat.clone();
-                tinted.base_color = blend(mat.base_color, tint_color, 0.4);
-                commands.entity(entity).insert(MeshMaterial3d(materials.add(tinted)));
-            }
+        let Some(color) = tint else {
+            continue;
+        };
+
+        // Get or store original material
+        let original = if let Some(h) = cache.originals.get(&entity) {
+            h.clone()
+        } else if let Ok(mesh_mat) = mesh_materials.get(entity) {
+            let h = mesh_mat.0.clone();
+            cache.originals.insert(entity, h.clone());
+            h
         } else {
-            // Restore original
-            commands.entity(entity).insert(MeshMaterial3d(original)).remove::<OriginalMaterial>();
+            continue;
+        };
+
+        // Apply tint
+        if let Some(mat) = materials.get(&original) {
+            let mut tinted = mat.clone();
+            tinted.base_color = blend(mat.base_color, color, 0.4);
+            commands.entity(entity).insert(MeshMaterial3d(materials.add(tinted)));
         }
     }
 }
 
-fn blend(a: Color, b: Color, f: f32) -> Color {
-    let a = a.to_linear();
-    let b = b.to_linear();
+// ── Helper ────────────────────────────────────────────────────────
+
+fn blend(base: Color, tint: Color, factor: f32) -> Color {
+    let a = base.to_linear();
+    let b = tint.to_linear();
     Color::LinearRgba(
         LinearRgba::new(
-            a.red + (b.red - a.red) * f,
-            a.green + (b.green - a.green) * f,
-            a.blue + (b.blue - a.blue) * f,
+            a.red + (b.red - a.red) * factor,
+            a.green + (b.green - a.green) * factor,
+            a.blue + (b.blue - a.blue) * factor,
             a.alpha
         )
     )

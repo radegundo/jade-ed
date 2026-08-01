@@ -1,50 +1,55 @@
 use bevy::prelude::*;
 
-/// Attached to an entity while it's being dragged.
+/// Attached to entity while being dragged.
 #[derive(Component)]
 pub struct BeingDragged {
-    /// Offset from entity center to where user grabbed it.
-    /// If you grab the corner, the corner follows the cursor.
     pub grab_offset: Vec3,
-
-    /// Entity's position when drag started.
-    /// Used for cancel (Escape) or undo.
     pub start_position: Vec3,
 }
 
-/// Resource tracking global drag state.
+/// Global drag tracking.
 #[derive(Resource, Default)]
 pub struct DragState {
-    /// Entity currently being dragged
     pub entity: Option<Entity>,
-    /// Screen position where mouse was pressed.
     pub press_screen_pos: Vec2,
-    /// 3D position where mouse was pressed.
-    pub press_world_pos: Vec3,
-    /// Are we past the drag threshold?
     pub is_dragging: bool,
 }
 
 const DRAG_THRESHOLD: f32 = 5.0;
 
+/// Observer: mouse pressed on entity. Start tracking, but DON'T drag yet.
 pub fn on_press(
     trigger: On<Pointer<Press>>,
     mut drag_state: ResMut<DragState>,
-    state: Res<crate::picking::state::PickingState>
+    state: Res<crate::picking::state::PickingState>,
+    meshes: Query<(), (With<Transform>, With<Mesh3d>)>
 ) {
     if trigger.button != PointerButton::Primary {
+        return;
+    }
+
+    // Only track presses on actual mesh entities
+    if meshes.get(trigger.event_target()).is_err() {
+        return;
+    }
+
+    // Don't overwrite active drag
+    if drag_state.entity.is_some() {
         return;
     }
 
     drag_state.entity = Some(trigger.event_target());
     drag_state.press_screen_pos = state.cursor_pos;
     drag_state.is_dragging = false;
+
+    println!("Drag start tracking: {:?}", trigger.event_target());
 }
 
+/// System: handle drag logic every frame.
 pub fn update_drag(
     mut commands: Commands,
     mut drag_state: ResMut<DragState>,
-    state: Res<super::state::PickingState>,
+    state: Res<crate::picking::state::PickingState>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut transforms: Query<&mut Transform>,
     dragged_query: Query<&BeingDragged>,
@@ -54,10 +59,10 @@ pub fn update_drag(
         return;
     };
 
-    // ── Mouse released: commit or cancel ─────────────────────────
+    // ── Mouse released ───────────────────────────────────────────
     if !mouse_buttons.pressed(MouseButton::Left) {
         if drag_state.is_dragging {
-            // Final snap on release (unless Alt held)
+            // Final snap
             if let Ok(mut transform) = transforms.get_mut(entity) {
                 if !state.alt_held {
                     transform.translation.x = (transform.translation.x / 1.0).round() * 1.0;
@@ -70,29 +75,34 @@ pub fn update_drag(
         return;
     }
 
-    // ── Check drag threshold ─────────────────────────────────────
+    // ── Check threshold, start drag if past ──────────────────────
     if !drag_state.is_dragging {
         let delta = state.cursor_pos - drag_state.press_screen_pos;
         if delta.length() < DRAG_THRESHOLD {
-            return; // still a potential click, don't drag yet
+            return; // still a click, not a drag
         }
+        println!("Delta: {}, threshold: {}", delta.length(), DRAG_THRESHOLD);
 
-        // Start dragging!
+        // START DRAG — compute grab offset and insert component
         drag_state.is_dragging = true;
 
-        let Ok(transform) = transforms.get(entity) else {
-            return;
+        // Use block scope to avoid double borrow
+        let (grab_offset, start_pos) = {
+            let Ok(transform) = transforms.get(entity) else {
+                return;
+            };
+            let grab_point = state.mesh_hit_point.unwrap_or(transform.translation);
+            let offset = transform.translation - grab_point;
+            (offset, transform.translation)
         };
-        let grab_point = state.mesh_hit_point.unwrap_or(transform.translation);
-        let grab_offset = transform.translation - grab_point;
 
         commands.entity(entity).insert(BeingDragged {
             grab_offset,
-            start_position: transform.translation,
+            start_position: start_pos,
         });
     }
 
-    // ── Update dragged position ──────────────────────────────────
+    // ── Move entity ──────────────────────────────────────────────
     let Ok(drag) = dragged_query.get(entity) else {
         return;
     };
@@ -101,14 +111,13 @@ pub fn update_drag(
     };
 
     let target = if let Some(ground) = state.ground_hit_snapped {
-        // Drag on ground plane: snap XZ, preserve original Y
         Vec3::new(ground.x, drag.start_position.y, ground.z) + drag.grab_offset
     } else if let Some(mesh_point) = state.mesh_hit_point {
-        // Drag over mesh surface
         mesh_point + drag.grab_offset
     } else {
-        return; // nowhere to drag to
+        return;
     };
 
+    println!("Moving to {:?}", target);
     transform.translation = target;
 }
