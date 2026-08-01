@@ -67,10 +67,8 @@ pub fn update_picking_state(
     state.mesh_hit_normal = None;
 
     for interaction in &interactions {
-        if let Some((entity, hit)) = interaction.get_nearest_hit() {
+        if let Some((entity, _)) = interaction.get_nearest_hit() {
             state.hovered_entity = Some(*entity);
-            state.mesh_hit_point = hit.position;
-            state.mesh_hit_normal = hit.normal;
         }
     }
 }

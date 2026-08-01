@@ -41,8 +41,6 @@ pub fn on_press(
     drag_state.entity = Some(trigger.event_target());
     drag_state.press_screen_pos = state.cursor_pos;
     drag_state.is_dragging = false;
-
-    println!("Drag start tracking: {:?}", trigger.event_target());
 }
 
 /// System: handle drag logic every frame.
@@ -81,7 +79,6 @@ pub fn update_drag(
         if delta.length() < DRAG_THRESHOLD {
             return; // still a click, not a drag
         }
-        println!("Delta: {}, threshold: {}", delta.length(), DRAG_THRESHOLD);
 
         // START DRAG — compute grab offset and insert component
         drag_state.is_dragging = true;
@@ -118,6 +115,5 @@ pub fn update_drag(
         return;
     };
 
-    println!("Moving to {:?}", target);
     transform.translation = target;
 }
