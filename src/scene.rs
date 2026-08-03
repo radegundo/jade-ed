@@ -8,23 +8,7 @@ impl Plugin for ScenePlugin {
     }
 }
 
-pub fn setup_scene(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>
-) {
-    commands.spawn((
-        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
-        MeshMaterial3d(
-            materials.add(StandardMaterial {
-                base_color: Color::srgb(0.7, 0.7, 0.7),
-                perceptual_roughness: 0.85,
-                ..default()
-            })
-        ),
-        Transform::from_xyz(0.0, 0.5, 0.0),
-        Pickable::default(),
-    ));
+pub fn setup_scene(mut commands: Commands) {
     commands.spawn((
         DirectionalLight {
             illuminance: 5000.0,

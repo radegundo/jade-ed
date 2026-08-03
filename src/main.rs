@@ -2,6 +2,11 @@ use bevy::prelude::*;
 use bevy::window::{ PresentMode, WindowResolution };
 
 mod editor;
+mod map;
+mod map_gizmos;
+mod map_handles;
+mod map_preview;
+mod mode;
 mod scene;
 mod ui;
 mod viewport;

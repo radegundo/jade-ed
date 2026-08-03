@@ -22,9 +22,15 @@ pub fn on_press(
     trigger: On<Pointer<Press>>,
     mut drag_state: ResMut<DragState>,
     state: Res<crate::picking::state::PickingState>,
+    keyboard: Res<ButtonInput<KeyCode>>,
     meshes: Query<(), (With<Transform>, With<Mesh3d>)>
 ) {
     if trigger.button != PointerButton::Primary {
+        return;
+    }
+
+    // Space + left is reserved for camera pan, never vertex drag.
+    if keyboard.pressed(KeyCode::Space) {
         return;
     }
 
@@ -57,6 +63,16 @@ pub fn update_drag(
         return;
     };
 
+    // Space + left switches to pan: abort any in-flight vertex drag so the
+    // camera pan (control_2d_camera) takes over exclusively.
+    if keyboard.pressed(KeyCode::Space) {
+        if let Ok(mut entity_cmds) = commands.get_entity(entity) {
+            entity_cmds.remove::<BeingDragged>();
+        }
+        *drag_state = DragState::default();
+        return;
+    }
+
     // ── Mouse released ───────────────────────────────────────────
     if !mouse_buttons.pressed(MouseButton::Left) {
         if drag_state.is_dragging {
@@ -67,7 +83,9 @@ pub fn update_drag(
                     transform.translation.z = (transform.translation.z / 1.0).round() * 1.0;
                 }
             }
-            commands.entity(entity).remove::<BeingDragged>();
+            if let Ok(mut entity_cmds) = commands.get_entity(entity) {
+                entity_cmds.remove::<BeingDragged>();
+            }
         }
         *drag_state = DragState::default();
         return;
@@ -93,10 +111,12 @@ pub fn update_drag(
             (offset, transform.translation)
         };
 
-        commands.entity(entity).insert(BeingDragged {
-            grab_offset,
-            start_position: start_pos,
-        });
+        if let Ok(mut entity_cmds) = commands.get_entity(entity) {
+            entity_cmds.insert(BeingDragged {
+                grab_offset,
+                start_position: start_pos,
+            });
+        }
     }
 
     // ── Move entity ──────────────────────────────────────────────

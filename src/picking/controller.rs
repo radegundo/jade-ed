@@ -1,11 +1,14 @@
 use bevy::{ picking::pointer::PointerInteraction, prelude::* };
 use super::state::{ PickingState, snap_to_grid };
+use crate::mode::{Camera2D, Camera3D, EditorMode, ModeState};
 
 /// Compute all picking data once per frame.
 pub fn update_picking_state(
     mut state: ResMut<PickingState>,
     windows: Query<&Window>,
-    cameras: Query<(&Camera, &GlobalTransform)>,
+    mode: Res<ModeState>,
+    cameras_2d: Query<(&Camera, &GlobalTransform), With<Camera2D>>,
+    cameras_3d: Query<(&Camera, &GlobalTransform), With<Camera3D>>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     interactions: Query<&PointerInteraction>,
@@ -14,8 +17,16 @@ pub fn update_picking_state(
     let Ok(window) = windows.single() else {
         return;
     };
-    let Ok((camera, camera_transform)) = cameras.single() else {
-        return;
+
+    let (camera, camera_transform) = match mode.mode {
+        EditorMode::Edit2D => match cameras_2d.single() {
+            Ok(c) => c,
+            Err(_) => return,
+        },
+        EditorMode::View3D => match cameras_3d.single() {
+            Ok(c) => c,
+            Err(_) => return,
+        },
     };
 
     // Cursor position

@@ -38,8 +38,10 @@ pub fn restore_unmarked_materials(
     mut cache: ResMut<MaterialCache>
 ) {
     for entity in &query {
-        if let Some(orig) = cache.originals.remove(&entity) {
-            commands.entity(entity).insert(MeshMaterial3d(orig));
+        if let Some(orig) = cache.originals.remove(&entity)
+            && let Ok(mut entity_cmds) = commands.get_entity(entity)
+        {
+            entity_cmds.insert(MeshMaterial3d(orig));
         }
     }
 }
@@ -85,10 +87,12 @@ pub fn apply_material_tints(
         };
 
         // Apply tint
-        if let Some(mat) = materials.get(&original) {
+        if let Some(mat) = materials.get(&original)
+            && let Ok(mut entity_cmds) = commands.get_entity(entity)
+        {
             let mut tinted = mat.clone();
             tinted.base_color = blend(mat.base_color, color, 0.4);
-            commands.entity(entity).insert(MeshMaterial3d(materials.add(tinted)));
+            entity_cmds.insert(MeshMaterial3d(materials.add(tinted)));
         }
     }
 }

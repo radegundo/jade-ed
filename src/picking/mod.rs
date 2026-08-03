@@ -3,6 +3,7 @@ use bevy::prelude::*;
 // Re-export components and systems from submodules
 // pub use highlight::*;
 
+use crate::mode::{in_mode, EditorMode};
 use crate::picking::{
     controller::update_picking_state,
     drag::update_drag,
@@ -20,11 +21,15 @@ pub struct OwnPickingPlugin;
 // ── Observers (fire when pointer events occur) ────────────────────
 
 pub fn on_hover_enter(trigger: On<Pointer<Over>>, mut commands: Commands) {
-    commands.entity(trigger.event_target()).insert(Hovered);
+    if let Ok(mut entity) = commands.get_entity(trigger.event_target()) {
+        entity.insert(Hovered);
+    }
 }
 
 pub fn on_hover_exit(trigger: On<Pointer<Out>>, mut commands: Commands) {
-    commands.entity(trigger.event_target()).remove::<Hovered>();
+    if let Ok(mut entity) = commands.get_entity(trigger.event_target()) {
+        entity.remove::<Hovered>();
+    }
 }
 
 impl Plugin for OwnPickingPlugin {
@@ -44,6 +49,6 @@ impl Plugin for OwnPickingPlugin {
                 Update,
                 (visuals::restore_unmarked_materials, visuals::apply_material_tints).chain()
             )
-            .add_systems(Update, update_drag);
+            .add_systems(Update, update_drag.run_if(in_mode(EditorMode::Edit2D)));
     }
 }
