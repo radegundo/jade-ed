@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 use bevy::window::{ PresentMode, WindowResolution };
-
 mod editor;
 mod map;
 mod map_gizmos;

@@ -1,6 +1,7 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
+use std::collections::HashMap;
 use crate::map::{Map, Sector};
 use crate::mode::{EditorMode, ModeState, VisibleIn3D};
 
@@ -24,7 +25,7 @@ fn update_3d_preview(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     existing: Query<Entity, With<MapPreviewMesh>>,
-    mut material: Local<Option<Handle<StandardMaterial>>>,
+    mut material_cache: Local<HashMap<Handle<Image>, Handle<StandardMaterial>>>,
 ) {
     let visible = mode.mode == EditorMode::View3D;
 
@@ -41,31 +42,35 @@ fn update_3d_preview(
         return;
     }
 
-    let mat = match material.as_ref() {
-        Some(h) => h.clone(),
-        None => {
-            let h = materials.add(StandardMaterial {
-                base_color: Color::srgb(0.65, 0.65, 0.7),
-                perceptual_roughness: 0.9,
-                cull_mode: None, // double-sided so walls are visible from both sides
-                ..default()
-            });
-            *material = Some(h.clone());
-            h
-        }
-    };
-
     for sector in &map.sectors {
-        let mesh = build_sector_mesh(sector, &map.vertices);
-        commands.spawn((
-            MapPreviewMesh,
-            VisibleIn3D,
-            // Previews are not interactive; without this they'd be pickable by
-            // default and could race with the despawn/respawn cycle below.
-            Pickable::IGNORE,
-            Mesh3d(meshes.add(mesh)),
-            MeshMaterial3d(mat.clone()),
-        ));
+        for (image, mesh_data) in build_sector_meshes(sector, &map) {
+            if mesh_data.positions.is_empty() {
+                continue;
+            }
+            let mat = match material_cache.get(&image) {
+                Some(h) => h.clone(),
+                None => {
+                    let h = materials.add(StandardMaterial {
+                        base_color: Color::WHITE,
+                        base_color_texture: Some(image.clone()),
+                        perceptual_roughness: 0.9,
+                        cull_mode: None, // double-sided so walls are visible from both sides
+                        ..default()
+                    });
+                    material_cache.insert(image, h.clone());
+                    h
+                }
+            };
+            commands.spawn((
+                MapPreviewMesh,
+                VisibleIn3D,
+                // Previews are not interactive; without this they'd be pickable by
+                // default and could race with the despawn/respawn cycle below.
+                Pickable::IGNORE,
+                Mesh3d(meshes.add(mesh_data.into_mesh())),
+                MeshMaterial3d(mat),
+            ));
+        }
     }
 }
 
@@ -119,6 +124,24 @@ impl MeshData {
         self.indices.push(base + 2);
         self.indices.push(base + 3);
     }
+
+    /// Convert accumulated data into a triangle-list mesh.
+    fn into_mesh(self) -> Mesh {
+        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, self.uvs);
+        mesh.insert_indices(Indices::U32(self.indices));
+        mesh
+    }
+}
+
+/// Get-or-insert the mesh bucket for a texture.
+fn bucket<'a>(
+    buckets: &'a mut HashMap<Handle<Image>, MeshData>,
+    tex: &Handle<Image>,
+) -> &'a mut MeshData {
+    buckets.entry(tex.clone()).or_default()
 }
 
 /// Interior-facing normal for a wall from `a` to `b` on the XZ plane.
@@ -129,45 +152,80 @@ fn interior_normal(a: Vec2, b: Vec2) -> Vec3 {
     Vec3::new(-dz, 0.0, dx).normalize_or_zero()
 }
 
-fn build_sector_mesh(sector: &Sector, vertices: &[Vec2]) -> Mesh {
-    let mut data = MeshData::default();
+/// Build one mesh per texture used by a sector, so each surface can use the
+/// image assigned to it in the map data (floor, ceiling, walls, obstacles).
+fn build_sector_meshes(sector: &Sector, map: &Map) -> HashMap<Handle<Image>, MeshData> {
+    let mut buckets: HashMap<Handle<Image>, MeshData> = HashMap::new();
 
     // Sector outline (walls in order describe a convex polygon)
-    let outline: Vec<Vec2> = sector.walls.iter().map(|w| *w.start(vertices)).collect();
+    let outline: Vec<Vec2> = sector.walls.iter().map(|w| *w.start(&map.vertices)).collect();
 
-    // Floor (visible from above) and ceiling (visible from below)
-    data.add_polygon(&outline, sector.floor_height, Vec3::Y);
-    data.add_polygon(&outline, sector.ceiling_height, Vec3::NEG_Y);
+    // Floor (visible from above) and ceiling (visible from below). The outline
+    // is wound counter-clockwise seen from above, which makes the floor's front
+    // face point up; reversing it for the ceiling makes the front face point
+    // down so its texture reads correctly (not mirrored) from inside the room.
+    // The ceiling still gets an up-facing normal so it is lit by the top light.
+    bucket(&mut buckets, &sector.floor_texture)
+        .add_polygon(&outline, sector.floor_height, Vec3::Y);
+    let ceiling_outline: Vec<Vec2> = outline.iter().rev().copied().collect();
+    bucket(&mut buckets, &sector.ceiling_texture)
+        .add_polygon(&ceiling_outline, sector.ceiling_height, Vec3::Y);
 
-    // Wall quads
+    // Wall quads. Portals are only built by the owner sector (the one with the
+    // lower id) and only as the floor/ceiling step regions, so the shared wall
+    // is rendered exactly once and the doorway stays open.
     for wall in &sector.walls {
-        let a = *wall.start(vertices);
-        let b = *wall.end(vertices);
-        data.add_wall_quad(
-            a,
-            b,
-            sector.floor_height,
-            sector.ceiling_height,
-            interior_normal(a, b),
-        );
+        let a = *wall.start(&map.vertices);
+        let b = *wall.end(&map.vertices);
+
+        if let Some(back) = &wall.back_side_def {
+            if sector.id >= back.facing {
+                continue;
+            }
+            let Some(back_sector) = map.sectors.iter().find(|s| s.id == back.facing) else {
+                continue;
+            };
+
+            let floor_lo = sector.floor_height.min(back_sector.floor_height);
+            let floor_hi = sector.floor_height.max(back_sector.floor_height);
+            if floor_hi - floor_lo > 0.001
+                && let Some(tex) = wall.front_side_def.textures.lower.as_ref()
+            {
+                bucket(&mut buckets, tex)
+                    .add_wall_quad(a, b, floor_lo, floor_hi, interior_normal(a, b));
+            }
+
+            let ceil_lo = sector.ceiling_height.min(back_sector.ceiling_height);
+            let ceil_hi = sector.ceiling_height.max(back_sector.ceiling_height);
+            if ceil_hi - ceil_lo > 0.001
+                && let Some(tex) = wall.front_side_def.textures.upper.as_ref()
+            {
+                bucket(&mut buckets, tex)
+                    .add_wall_quad(a, b, ceil_lo, ceil_hi, interior_normal(a, b));
+            }
+        } else if let Some(tex) = wall.front_side_def.textures.middle.as_ref() {
+            bucket(&mut buckets, tex).add_wall_quad(
+                a,
+                b,
+                sector.floor_height,
+                sector.ceiling_height,
+                interior_normal(a, b),
+            );
+        }
     }
 
     // Obstacles: prisms between bottom..top
     for obs in &sector.obstacles {
-        let pts: Vec<Vec2> = obs.edges.iter().map(|e| *e.start(vertices)).collect();
-        data.add_polygon(&pts, obs.top, Vec3::Y);
-        data.add_polygon(&pts, obs.bottom, Vec3::NEG_Y);
+        let pts: Vec<Vec2> = obs.edges.iter().map(|e| *e.start(&map.vertices)).collect();
+        bucket(&mut buckets, &obs.top_texture).add_polygon(&pts, obs.top, Vec3::Y);
+        bucket(&mut buckets, &obs.bottom_texture).add_polygon(&pts, obs.bottom, Vec3::NEG_Y);
         for edge in &obs.edges {
-            let a = *edge.start(vertices);
-            let b = *edge.end(vertices);
-            data.add_wall_quad(a, b, obs.bottom, obs.top, interior_normal(a, b));
+            let a = *edge.start(&map.vertices);
+            let b = *edge.end(&map.vertices);
+            bucket(&mut buckets, &obs.side_texture)
+                .add_wall_quad(a, b, obs.bottom, obs.top, interior_normal(a, b));
         }
     }
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, data.positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, data.normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, data.uvs);
-    mesh.insert_indices(Indices::U32(data.indices));
-    mesh
+    buckets
 }

@@ -6,6 +6,7 @@
 //! kept intact but may be unused for now.
 #![allow(dead_code)]
 
+use bevy::image::{ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor};
 use bevy::prelude::*;
 
 //------------------------------MAP PLUGIN-------------------------
@@ -443,11 +444,22 @@ pub fn find_player_sector(player_pos: Vec2, map: &Map) -> Option<usize> {
 //-------------- MAP DATA ------------------------
 
 pub fn test_map(asset_server: Res<AssetServer>) -> Map {
-    let wall_tex: Handle<Image> = asset_server.load("texture.png");
-    let floor_tex: Handle<Image> = asset_server.load("floor_texture.png");
-    let ceil_tex: Handle<Image> = asset_server.load("floor_texture.png");
-    let obstacle_top_tex: Handle<Image> = asset_server.load("floor_texture.png");
-    let obstacle_bottom_tex: Handle<Image> = asset_server.load("floor_texture.png");
+    // Floor/ceiling/obstacle faces use UVs scaled to world units (0.1 per
+    // metre), so their textures must tile. The image loader defaults to
+    // ClampToEdge, which would only paint the first tile and show the
+    // texture's border colour everywhere else.
+    let repeat = |s: &mut ImageLoaderSettings| {
+        s.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
+            ..default()
+        });
+    };
+    let wall_tex: Handle<Image> = asset_server.load_builder().with_settings(repeat).load("texture.png");
+    let floor_tex: Handle<Image> = asset_server.load_builder().with_settings(repeat).load("floor_texture.png");
+    let ceil_tex: Handle<Image> = asset_server.load_builder().with_settings(repeat).load("floor_texture.png");
+    let obstacle_top_tex: Handle<Image> = asset_server.load_builder().with_settings(repeat).load("floor_texture.png");
+    let obstacle_bottom_tex: Handle<Image> = asset_server.load_builder().with_settings(repeat).load("floor_texture.png");
 
     let mut vertices = Vec::new();
 
