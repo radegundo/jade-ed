@@ -1,7 +1,8 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass};
+use crate::map::Map;
 use crate::mode::{EditorMode, ModeState};
-use crate::tools::{EditorTool, ToolState};
+use crate::tools::{EditorTool, Selection, ToolState};
 
 pub struct UiPlugin;
 
@@ -21,6 +22,8 @@ fn editor_ui(
     mut contexts: EguiContexts,
     mode: Res<ModeState>,
     mut tool_state: ResMut<ToolState>,
+    mut map: ResMut<Map>,
+    selection: Res<Selection>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
@@ -43,7 +46,7 @@ fn editor_ui(
         });
 
         let hint = match tool_state.tool {
-            EditorTool::Select => "Click to select · drag to move · Delete to remove",
+            EditorTool::Select => "Click to select · drag to move · Delete to remove · drag height handles / [ ] to adjust heights",
             EditorTool::DrawSector => "Click to place vertices · Right-click/Enter to close · Esc to cancel",
             EditorTool::DrawWall => "Click start then end · Right-click/Esc to cancel",
             EditorTool::PlaceObstacle => "Drag a rectangle inside a sector",
@@ -59,6 +62,57 @@ fn editor_ui(
             ui.colored_label(
                 egui::Color32::YELLOW,
                 "Press Tab to switch to 2D mode to draw",
+            );
+        }
+
+        ui.separator();
+        if let Some(idx) = selection.sector
+            && idx < map.sectors.len()
+        {
+            let id = map.sectors[idx].id;
+            ui.label(format!("Sector {id} heights"));
+            let s = &mut map.sectors[idx];
+            ui.horizontal(|ui| {
+                ui.label("Floor:");
+                ui.add(egui::DragValue::new(&mut s.floor_height).speed(0.25));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Ceiling:");
+                ui.add(egui::DragValue::new(&mut s.ceiling_height).speed(0.25));
+            });
+            // Keep floor <= ceiling after direct numeric edits.
+            if s.floor_height > s.ceiling_height {
+                s.floor_height = s.ceiling_height;
+            }
+            if s.ceiling_height < s.floor_height {
+                s.ceiling_height = s.floor_height;
+            }
+        }
+        if let Some((sid, oid)) = selection.obstacle
+            && let Some(si) = map.sectors.iter().position(|s| s.id == sid)
+            && let Some(oi) = map.sectors[si].obstacles.iter().position(|o| o.id == oid)
+        {
+            ui.label(format!("Obstacle {oid} heights"));
+            let o = &mut map.sectors[si].obstacles[oi];
+            ui.horizontal(|ui| {
+                ui.label("Bottom:");
+                ui.add(egui::DragValue::new(&mut o.bottom).speed(0.25));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Top:");
+                ui.add(egui::DragValue::new(&mut o.top).speed(0.25));
+            });
+            if o.bottom > o.top {
+                o.bottom = o.top;
+            }
+            if o.top < o.bottom {
+                o.top = o.bottom;
+            }
+        }
+        if mode.mode == EditorMode::View3D {
+            ui.colored_label(
+                egui::Color32::GRAY,
+                "In 3D, select a sector/obstacle, then drag the green/blue height handles (or the obstacle body).",
             );
         }
 

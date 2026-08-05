@@ -110,6 +110,11 @@ fn spawn_cameras(mut commands: Commands) {
         // keep one permanently. Only the ACTIVE one carries PrimaryEguiContext
         // (the egui host) plus its multi-pass schedule.
         EguiContext::default(),
+        // The app starts in 3D mode, so the (hidden) 2D camera must not capture
+        // the pointer here. If it did, bevy_egui would report this camera as a
+        // full-screen pointer hit that blocks the 3D height handles until the
+        // first Tab. `toggle_mode` keeps this in sync afterwards.
+        EguiContextSettings { capture_pointer_input: false, ..default() },
     ));
 }
 
@@ -120,6 +125,7 @@ fn toggle_mode(
     mut commands: Commands,
     mut mode_state: ResMut<ModeState>,
     mut drag_state: ResMut<crate::picking::drag::DragState>,
+    mut obstacle_drag: ResMut<crate::height_handles::ObstacleDrag>,
     mut cam2d: Query<(Entity, &mut Camera, &mut Visibility), With<Camera2D>>,
     mut cam3d: Query<(Entity, &mut Camera, &mut Visibility), (With<Camera3D>, Without<Camera2D>)>,
     mut egui_settings_2d: Query<&mut EguiContextSettings, With<Camera2D>>,
@@ -205,6 +211,7 @@ fn toggle_mode(
 
     // CRITICAL: Clear drag state to prevent cross-mode ghost dragging
     *drag_state = crate::picking::drag::DragState::default();
+    *obstacle_drag = crate::height_handles::ObstacleDrag::default();
 
     // Abort any in-flight drag (e.g. Tab pressed mid-drag): drop the marker
     // so the handle stops being written to the map / stays tinted.

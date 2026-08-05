@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy::window::{ PresentMode, WindowResolution };
 mod editor;
+mod height_handles;
 mod map;
 mod map_gizmos;
 mod map_handles;

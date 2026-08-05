@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use crate::height_handles::HeightHandlesPlugin;
 use crate::map::MapPlugin;
 use crate::map_gizmos::MapGizmosPlugin;
 use crate::map_handles::MapHandlesPlugin;
@@ -24,6 +25,7 @@ impl Plugin for EditorPlugin {
             MapHandlesPlugin,
             MapGizmosPlugin,
             MapPreviewPlugin,
+            HeightHandlesPlugin,
             ToolsPlugin,
         ));
     }

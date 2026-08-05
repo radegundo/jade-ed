@@ -1,7 +1,7 @@
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
 
-use crate::map::{snap_to_vertex, Map, MapAssets, Obstacle};
+use crate::map::{obstacle_center, snap_to_vertex, Map, MapAssets};
 use crate::map_handles::VertexHandle;
 use crate::mode::{in_mode, EditorMode, VisibleIn2D};
 use crate::picking::drag::BeingDragged;
@@ -57,12 +57,14 @@ pub struct ObstacleStamp {
     pub current: Vec2,
 }
 
-/// Current selection: either an entity (vertex handle / obstacle marker) or a
-/// sector index. Exactly one of the two should be set.
+/// Current selection: either an entity (vertex handle / obstacle marker), a
+/// sector index, or an obstacle (sector id, obstacle id). Exactly one of the
+/// three should be set.
 #[derive(Resource, Default)]
 pub struct Selection {
     pub entity: Option<Entity>,
     pub sector: Option<usize>,
+    pub obstacle: Option<(usize, usize)>,
 }
 
 /// Pickable marker at an obstacle's centroid, for select / drag / delete.
@@ -98,6 +100,7 @@ impl Plugin for ToolsPlugin {
                     move_dragged_obstacles,
                     select_click.run_if(tool_is(EditorTool::Select)),
                     delete_selected,
+                    nudge_selected_height,
                     draw_tool_gizmos,
                 )
                     .run_if(in_mode(EditorMode::Edit2D)),
@@ -220,16 +223,6 @@ fn obstacle_stamp_tool(
 }
 
 //------------------------------OBSTACLE HANDLES---------------------
-
-fn obstacle_center(obs: &Obstacle, vertices: &[Vec2]) -> Vec2 {
-    let mut sum = Vec2::ZERO;
-    let mut count = 0;
-    for e in &obs.edges {
-        sum += *e.start(vertices);
-        count += 1;
-    }
-    if count == 0 { Vec2::ZERO } else { sum / count as f32 }
-}
 
 fn sync_obstacle_handles(
     mut commands: Commands,
@@ -382,6 +375,7 @@ fn select_click(
         e.remove::<Selected>();
     }
     selection.sector = None;
+    selection.obstacle = None;
 
     if let Some(hovered) = picking.hovered_entity {
         if let Ok((entity, _)) = vertex_handles.get(hovered) {
@@ -391,8 +385,9 @@ fn select_click(
             }
             return;
         }
-        if let Ok((entity, _)) = obstacle_handles.get(hovered) {
+        if let Ok((entity, handle)) = obstacle_handles.get(hovered) {
             selection.entity = Some(entity);
+            selection.obstacle = Some((handle.sector_id, handle.obstacle_id));
             if let Ok(mut e) = commands.get_entity(entity) {
                 e.insert(Selected);
             }
@@ -443,6 +438,61 @@ fn delete_selected(
         state.message = Some(m);
     }
     *selection = Selection::default();
+}
+
+//------------------------------HEIGHT NUDGE (2D)--------------------
+
+/// `[` / `]` nudge the selected sector's floor (or obstacle's bottom);
+/// `Shift+[` / `Shift+]` nudge the ceiling (or top). Heights stay clamped
+/// through the sector/obstacle setters.
+fn nudge_selected_height(
+    mut map: ResMut<Map>,
+    selection: Res<Selection>,
+    keyboard: Res<ButtonInput<KeyCode>>,
+) {
+    let is_upper =
+        keyboard.pressed(KeyCode::ShiftLeft) || keyboard.pressed(KeyCode::ShiftRight);
+    let step = if keyboard.just_pressed(KeyCode::BracketLeft) {
+        Some(-1.0)
+    } else if keyboard.just_pressed(KeyCode::BracketRight) {
+        Some(1.0)
+    } else {
+        None
+    };
+    let Some(step) = step else {
+        return;
+    };
+
+    if let Some(sector_index) = selection.sector
+        && sector_index < map.sectors.len()
+    {
+        let sector = &mut map.sectors[sector_index];
+        if is_upper {
+            sector.set_ceiling_height(sector.ceiling_height + step);
+        } else {
+            sector.set_floor_height(sector.floor_height + step);
+        }
+        return;
+    }
+
+    if let Some((sector_id, obstacle_id)) = selection.obstacle {
+        let Some(sector_index) = map.sectors.iter().position(|s| s.id == sector_id) else {
+            return;
+        };
+        let Some(obs_index) = map.sectors[sector_index]
+            .obstacles
+            .iter()
+            .position(|o| o.id == obstacle_id)
+        else {
+            return;
+        };
+        let obs = &mut map.sectors[sector_index].obstacles[obs_index];
+        if is_upper {
+            obs.set_top(obs.top + step);
+        } else {
+            obs.set_bottom(obs.bottom + step);
+        }
+    }
 }
 
 //------------------------------GIZMOS-------------------------------
@@ -520,6 +570,23 @@ fn draw_tool_gizmos(
                 for w in &map.sectors[sector_index].walls {
                     let s = *w.start(&map.vertices);
                     let e = *w.end(&map.vertices);
+                    gizmos.line(
+                        Vec3::new(s.x, 0.05, s.y),
+                        Vec3::new(e.x, 0.05, e.y),
+                        Color::srgb(1.0, 0.6, 0.1),
+                    );
+                }
+            }
+            if let Some((sector_id, obstacle_id)) = selection.obstacle
+                && let Some(sector_index) = map.sectors.iter().position(|s| s.id == sector_id)
+                && let Some(obs) = map.sectors[sector_index]
+                    .obstacles
+                    .iter()
+                    .find(|o| o.id == obstacle_id)
+            {
+                for e in &obs.edges {
+                    let s = *e.start(&map.vertices);
+                    let e = *e.end(&map.vertices);
                     gizmos.line(
                         Vec3::new(s.x, 0.05, s.y),
                         Vec3::new(e.x, 0.05, e.y),

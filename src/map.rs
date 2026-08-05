@@ -70,8 +70,10 @@ pub struct Map {
 
 impl Map {
     /// Create a sector from a closed polygon. Points are normalized to
-    /// counter-clockwise winding. Any edge that exactly coincides with an
-    /// existing wall is turned into a portal between the two sectors.
+    /// counter-clockwise winding. Any edge that coincides with an existing
+    /// wall — exactly or by partially overlapping it — becomes a portal
+    /// between the two sectors; overlapped walls are split at the shared
+    /// boundaries so both sectors always share exact vertices.
     pub fn add_sector_from_polygon(
         &mut self,
         points: &[Vec2],
@@ -86,54 +88,81 @@ impl Map {
         }
         let id = self.next_sector_id();
 
-        // Validate every edge up front so a bad polygon never mutates the map.
+        // Plan every edge's overlaps up front so a bad polygon never mutates
+        // the map. Overlapping an existing portal is a 3-way junction and is
+        // rejected before anything changes.
         let n = ccw.len();
-        let mut portal_targets: Vec<Option<(usize, usize)>> = Vec::with_capacity(n);
+        let mut overlaps: Vec<EdgeOverlap> = Vec::new();
         for i in 0..n {
             let a = ccw[i];
             let b = ccw[(i + 1) % n];
-            if let Some(target) = self.find_wall_at_edge(a, b) {
-                if self.sectors[target.0].walls[target.1].back_side_def.is_some() {
-                    return Err(
-                        "An edge is already part of a portal (3-way junction is not supported)"
-                            .to_string(),
-                    );
+            overlaps.extend(self.collect_edge_overlaps(a, b)?);
+        }
+
+        // Split every overlapped wall at the shared boundaries so each portal
+        // piece becomes its own exact-matching sub-wall.
+        self.split_overlapped_walls(&overlaps);
+
+        // Build the new sector's walls. Each edge is divided at every overlap
+        // boundary that lies on it; pieces that exactly match a (now split)
+        // existing wall become portals, everything else stays solid.
+        let mut new_walls: Vec<LineDef> = Vec::new();
+        let mut portal_pairs: Vec<((usize, usize), usize)> = Vec::new();
+        for i in 0..n {
+            let a = ccw[i];
+            let b = ccw[(i + 1) % n];
+            let ab = b - a;
+            let ab_len_sq = ab.length_squared();
+            if ab_len_sq < 1e-12 {
+                return Err("Sector has a zero-length edge".to_string());
+            }
+
+            let mut ts: Vec<f32> = Vec::new();
+            for ov in &overlaps {
+                for p in [ov.start, ov.end] {
+                    if (p - a).perp_dot(ab).abs() > 1e-3 {
+                        continue;
+                    }
+                    let t = (p - a).dot(ab) / ab_len_sq;
+                    if t > 1e-4 && t < 1.0 - 1e-4 {
+                        ts.push(t);
+                    }
                 }
-                portal_targets.push(Some(target));
-            } else {
-                if self.any_partial_overlap(a, b) {
-                    return Err(
-                        "Edge partially overlaps an existing wall; align to existing vertices to \
-                         form a portal"
-                            .to_string(),
-                    );
+            }
+            ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            ts.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
+
+            let mut params = vec![0.0];
+            params.extend(ts);
+            params.push(1.0);
+            for w in params.windows(2) {
+                let p = a + ab * w[0];
+                let q = a + ab * w[1];
+                if (q - p).length() < 1e-4 {
+                    continue;
                 }
-                portal_targets.push(None);
+                let wall_id = WallId::new(id, new_walls.len());
+                let start_idx = add_vertex(&mut self.vertices, p);
+                let end_idx = add_vertex(&mut self.vertices, q);
+                if let Some((other_sector, other_wall)) = self.find_wall_at_edge(p, q) {
+                    let existing_id = self.sectors[other_sector].id;
+                    portal_pairs.push(((other_sector, other_wall), new_walls.len()));
+                    new_walls.push(portal_wall(
+                        start_idx,
+                        end_idx,
+                        id,
+                        existing_id,
+                        &assets.wall,
+                        wall_id,
+                    ));
+                } else {
+                    new_walls.push(solid_wall(start_idx, end_idx, id, &assets.wall, wall_id));
+                }
             }
         }
 
-        let mut walls = Vec::with_capacity(n);
-        for i in 0..n {
-            let a = ccw[i];
-            let b = ccw[(i + 1) % n];
-            let start_idx = add_vertex(&mut self.vertices, a);
-            let end_idx = add_vertex(&mut self.vertices, b);
-            let wall_id = WallId::new(id, i);
-            walls.push(match portal_targets[i] {
-                Some((other_sector, _)) => portal_wall(
-                    start_idx,
-                    end_idx,
-                    id,
-                    other_sector,
-                    &assets.wall,
-                    wall_id,
-                ),
-                None => solid_wall(start_idx, end_idx, id, &assets.wall, wall_id),
-            });
-        }
-
         self.sectors.push(Sector {
-            walls,
+            walls: new_walls,
             obstacles: Vec::new(),
             floor_height: DEFAULT_FLOOR_HEIGHT,
             ceiling_height: DEFAULT_CEILING_HEIGHT,
@@ -142,23 +171,22 @@ impl Map {
             id,
         });
 
-        // Now that the new sector exists, convert each matched wall into a portal.
-        for (_, target) in portal_targets.iter().enumerate() {
-            if let Some((other_sector, other_wall_idx)) = target {
-                to_portal_wall(
-                    &mut self.sectors[*other_sector].walls[*other_wall_idx],
-                    *other_sector,
-                    id,
-                    &assets.wall,
-                );
-            }
+        for ((other_sector, other_wall), _) in portal_pairs {
+            let existing_id = self.sectors[other_sector].id;
+            to_portal_wall(
+                &mut self.sectors[other_sector].walls[other_wall],
+                existing_id,
+                id,
+                &assets.wall,
+            );
         }
 
         Ok(id)
     }
 
-    /// Add a single wall to an existing sector. If the wall coincides exactly
-    /// with a wall of another sector, both become a portal.
+    /// Add a single wall to an existing sector. If the wall coincides with a
+    /// wall of another sector — exactly or by partially overlapping it — both
+    /// become a portal and the overlapped wall is split at the shared boundary.
     pub fn add_wall(
         &mut self,
         sector_id: usize,
@@ -182,46 +210,68 @@ impl Map {
             }
         }
 
-        let mut portal_to: Option<(usize, usize)> = None;
-        if let Some((other_sector, other_wall_idx)) = self.find_wall_at_edge(a, b) {
-            if other_sector == sector_index {
-                return Err("Wall already exists".to_string());
-            }
-            if self.sectors[other_sector].walls[other_wall_idx].back_side_def.is_some() {
-                return Err(
-                    "Edge already part of a portal (3-way junction is not supported)".to_string(),
-                );
-            }
-            portal_to = Some((other_sector, other_wall_idx));
-        } else if self.any_partial_overlap(a, b) {
-            return Err(
-                "Wall partially overlaps an existing wall; align to existing vertices to form a \
-                 portal"
-                    .to_string(),
-            );
+        let overlaps = self.collect_edge_overlaps(a, b)?;
+        if overlaps.iter().any(|ov| ov.sector == sector_index) {
+            return Err("Wall already exists in this sector".to_string());
         }
 
-        let start_idx = add_vertex(&mut self.vertices, a);
-        let end_idx = add_vertex(&mut self.vertices, b);
-        let wall_index = self.sectors[sector_index].walls.len();
-        let wall_id = WallId::new(sector_id, wall_index);
-        let wall = match portal_to {
-            Some((other_sector, _)) => portal_wall(
-                start_idx,
-                end_idx,
-                sector_id,
-                other_sector,
-                &assets.wall,
-                wall_id,
-            ),
-            None => solid_wall(start_idx, end_idx, sector_id, &assets.wall, wall_id),
-        };
-        self.sectors[sector_index].walls.push(wall);
+        // Split overlapped walls so the portal pieces share exact vertices.
+        self.split_overlapped_walls(&overlaps);
 
-        if let Some((other_sector, other_wall_idx)) = portal_to {
+        // Build the (possibly split) wall pieces.
+        let ab = b - a;
+        let ab_len_sq = ab.length_squared();
+        let mut ts: Vec<f32> = Vec::new();
+        for ov in &overlaps {
+            for p in [ov.start, ov.end] {
+                let t = (p - a).dot(ab) / ab_len_sq;
+                if t > 1e-4 && t < 1.0 - 1e-4 {
+                    ts.push(t);
+                }
+            }
+        }
+        ts.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        ts.dedup_by(|x, y| (*x - *y).abs() < 1e-4);
+
+        let mut params = vec![0.0];
+        params.extend(ts);
+        params.push(1.0);
+        let mut portal_pairs: Vec<(usize, usize)> = Vec::new();
+        for w in params.windows(2) {
+            let p = a + ab * w[0];
+            let q = a + ab * w[1];
+            if (q - p).length() < 1e-4 {
+                continue;
+            }
+            let wall_index = self.sectors[sector_index].walls.len();
+            let wall_id = WallId::new(sector_id, wall_index);
+            if let Some((other_sector, other_wall)) = self.find_wall_at_edge(p, q) {
+                let existing_id = self.sectors[other_sector].id;
+                portal_pairs.push((other_sector, other_wall));
+                self.sectors[sector_index].walls.push(portal_wall(
+                    add_vertex(&mut self.vertices, p),
+                    add_vertex(&mut self.vertices, q),
+                    sector_id,
+                    existing_id,
+                    &assets.wall,
+                    wall_id,
+                ));
+            } else {
+                self.sectors[sector_index].walls.push(solid_wall(
+                    add_vertex(&mut self.vertices, p),
+                    add_vertex(&mut self.vertices, q),
+                    sector_id,
+                    &assets.wall,
+                    wall_id,
+                ));
+            }
+        }
+
+        for (other_sector, other_wall) in portal_pairs {
+            let existing_id = self.sectors[other_sector].id;
             to_portal_wall(
-                &mut self.sectors[other_sector].walls[other_wall_idx],
-                other_sector,
+                &mut self.sectors[other_sector].walls[other_wall],
+                existing_id,
                 sector_id,
                 &assets.wall,
             );
@@ -412,23 +462,100 @@ impl Map {
         None
     }
 
-    /// True if (a,b) lies along an existing wall line but is not an exact match
-    /// (a T-junction). Such edges can't become portals without splitting walls,
-    /// so they're rejected.
-    fn any_partial_overlap(&self, a: Vec2, b: Vec2) -> bool {
-        for sector in &self.sectors {
-            for wall in &sector.walls {
+    /// All existing solid walls that `(a, b)` overlaps — exactly or partially —
+    /// with the overlap interval ordered along `(a, b)`. Overlapping an
+    /// existing portal is a 3-way junction and is rejected.
+    fn collect_edge_overlaps(&self, a: Vec2, b: Vec2) -> Result<Vec<EdgeOverlap>, String> {
+        let mut out = Vec::new();
+        for (si, sector) in self.sectors.iter().enumerate() {
+            for (wi, wall) in sector.walls.iter().enumerate() {
                 let c = *wall.start(&self.vertices);
                 let d = *wall.end(&self.vertices);
-                if segments_overlap(a, b, c, d) {
-                    return true;
+                let Some((s, e)) = collinear_overlap(a, b, c, d) else {
+                    continue;
+                };
+                if wall.back_side_def.is_some() {
+                    return Err(
+                        "An edge overlaps an existing portal (3-way junction is not supported)"
+                            .to_string(),
+                    );
+                }
+                out.push(EdgeOverlap { start: s, end: e, sector: si, wall: wi });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Split every solid wall touched by an overlap at the overlap interval
+    /// boundaries, so each portal piece becomes its own exact-matching
+    /// sub-wall. Cut positions are reused verbatim from the overlaps so both
+    /// sectors resolve to the same pooled vertices.
+    fn split_overlapped_walls(&mut self, overlaps: &[EdgeOverlap]) {
+        let mut cuts: Vec<(usize, usize, Vec<(f32, Vec2)>)> = Vec::new();
+        for ov in overlaps {
+            let wall = &self.sectors[ov.sector].walls[ov.wall];
+            let c = *wall.start(&self.vertices);
+            let d = *wall.end(&self.vertices);
+            let cd = d - c;
+            let len_sq = cd.length_squared();
+            if len_sq < 1e-12 {
+                continue;
+            }
+            for p in [ov.start, ov.end] {
+                let t = (p - c).dot(cd) / len_sq;
+                if t > 1e-4 && t < 1.0 - 1e-4 {
+                    match cuts.iter_mut().find(|(s, w, _)| *s == ov.sector && *w == ov.wall) {
+                        Some((_, _, ts)) => ts.push((t, p)),
+                        None => cuts.push((ov.sector, ov.wall, vec![(t, p)])),
+                    }
                 }
             }
         }
-        false
+        if cuts.is_empty() {
+            return;
+        }
+        for (_, _, ts) in &mut cuts {
+            ts.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+            ts.dedup_by(|x, y| (x.0 - y.0).abs() < 1e-4);
+        }
+
+        // Rebuild each affected sector's wall list so later wall indices don't
+        // shift under earlier splits in the same sector.
+        for (si, wi, ts) in cuts {
+            let old_walls = std::mem::take(&mut self.sectors[si].walls);
+            let mut new_walls: Vec<LineDef> = Vec::new();
+            for (i, wall) in old_walls.into_iter().enumerate() {
+                if i != wi {
+                    new_walls.push(wall);
+                    continue;
+                }
+                let c = *wall.start(&self.vertices);
+                let d = *wall.end(&self.vertices);
+                let tex = wall.front_side_def.textures.middle.clone().unwrap_or_default();
+                let mut params = vec![(0.0, c)];
+                params.extend(ts.iter().copied());
+                params.push((1.0, d));
+                for w in params.windows(2) {
+                    let (_, p) = w[0];
+                    let (_, q) = w[1];
+                    if (q - p).length() < 1e-4 {
+                        continue;
+                    }
+                    let wall_id = WallId::new(self.sectors[si].id, new_walls.len());
+                    new_walls.push(solid_wall(
+                        add_vertex(&mut self.vertices, p),
+                        add_vertex(&mut self.vertices, q),
+                        wall.front_side_def.facing,
+                        &tex,
+                        wall_id,
+                    ));
+                }
+            }
+            self.sectors[si].walls = new_walls;
+        }
     }
 
-    fn sector_centroid(&self, sector_index: usize) -> Option<Vec2> {
+    pub fn sector_centroid(&self, sector_index: usize) -> Option<Vec2> {
         let sector = &self.sectors[sector_index];
         let pts: Vec<Vec2> = sector
             .walls
@@ -484,32 +611,41 @@ pub fn snap_to_vertex(vertices: &[Vec2], pos: Vec2, radius: f32) -> Option<Vec2>
         .min_by(|a, b| a.distance(pos).partial_cmp(&b.distance(pos)).unwrap())
 }
 
-/// True if (a,b) and (c,d) are collinear, overlap in a positive-length
-/// interval, and are not the exact same segment (which is handled separately).
-fn segments_overlap(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+/// Intersection of segments (a,b) and (c,d) when they are collinear, returned
+/// ordered along (a,b). `None` if they don't overlap in a positive length.
+fn collinear_overlap(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Option<(Vec2, Vec2)> {
     let ab = b - a;
     let ab_len_sq = ab.length_squared();
-    if ab_len_sq < 1e-6 {
-        return false;
+    if ab_len_sq < 1e-12 {
+        return None;
     }
     let cd = d - c;
     if ab.perp_dot(cd).abs() > 1e-3 {
-        return false;
+        return None;
     }
     if ab.perp_dot(c - a).abs() > 1e-3 {
-        return false;
+        return None;
     }
     let t1 = (c - a).dot(ab) / ab_len_sq;
     let t2 = (d - a).dot(ab) / ab_len_sq;
-    let lo = t1.min(t2);
-    let hi = t1.max(t2);
-    let overlap_len = (hi.min(1.0) - lo.max(0.0)) * ab.length();
-    if overlap_len < 1e-3 {
-        return false;
+    let lo = t1.min(t2).max(0.0);
+    let hi = t1.max(t2).min(1.0);
+    if hi - lo < 1e-4 {
+        return None;
     }
-    // Exclude exact full coverage; that's the portal case, not a partial overlap.
-    let full = lo <= 1e-3 && hi >= 1.0 - 1e-3;
-    !full
+    Some((a + ab * lo, a + ab * hi))
+}
+
+/// A collinear overlap between a newly drawn edge and one existing solid wall.
+#[derive(Clone, Copy, Debug)]
+struct EdgeOverlap {
+    /// Overlap interval endpoints, ordered along the new edge's direction.
+    start: Vec2,
+    end: Vec2,
+    /// Index of the existing wall's sector.
+    sector: usize,
+    /// Index of the existing wall within that sector.
+    wall: usize,
 }
 
 #[derive(Clone, Default)]
@@ -523,6 +659,18 @@ pub struct Sector {
     pub id: usize,
 }
 
+impl Sector {
+    /// Set the floor height, clamped so it never exceeds the ceiling height.
+    pub fn set_floor_height(&mut self, h: f32) {
+        self.floor_height = h.min(self.ceiling_height);
+    }
+
+    /// Set the ceiling height, clamped so it never drops below the floor height.
+    pub fn set_ceiling_height(&mut self, h: f32) {
+        self.ceiling_height = h.max(self.floor_height);
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Obstacle {
     pub id: usize,
@@ -532,6 +680,18 @@ pub struct Obstacle {
     pub side_texture: Handle<Image>,
     pub top_texture: Handle<Image>,
     pub bottom_texture: Handle<Image>,
+}
+
+impl Obstacle {
+    /// Set the bottom height, clamped so it never exceeds the top height.
+    pub fn set_bottom(&mut self, h: f32) {
+        self.bottom = h.min(self.top);
+    }
+
+    /// Set the top height, clamped so it never drops below the bottom height.
+    pub fn set_top(&mut self, h: f32) {
+        self.top = h.max(self.bottom);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -997,13 +1157,15 @@ pub fn rect_sector(
 
 //---------------HELPER FUNCTIONS----------------------
 
-pub fn point_in_sector(point: Vec2, sector: &Sector, vertices: &[Vec2]) -> bool {
+/// Ray-cast point-in-polygon test on the XZ plane.
+pub fn point_in_polygon(point: Vec2, polygon: &[Vec2]) -> bool {
     let mut inside = false;
-    for wall in &sector.walls {
-        let start = wall.start(vertices);
-        let end = wall.end(vertices);
-        let (x1, y1) = (start.x, start.y);
-        let (x2, y2) = (end.x, end.y);
+    let n = polygon.len();
+    for i in 0..n {
+        let a = polygon[i];
+        let b = polygon[(i + 1) % n];
+        let (x1, y1) = (a.x, a.y);
+        let (x2, y2) = (b.x, b.y);
         let crosses = (y1 > point.y) != (y2 > point.y);
         if crosses {
             let x_intersect = x1 + ((point.y - y1) / (y2 - y1)) * (x2 - x1);
@@ -1013,6 +1175,26 @@ pub fn point_in_sector(point: Vec2, sector: &Sector, vertices: &[Vec2]) -> bool 
         }
     }
     inside
+}
+
+pub fn point_in_sector(point: Vec2, sector: &Sector, vertices: &[Vec2]) -> bool {
+    let outline: Vec<Vec2> = sector.walls.iter().map(|w| *w.start(vertices)).collect();
+    point_in_polygon(point, &outline)
+}
+
+/// Centroid of an obstacle's polygon (average of its edge start points).
+pub fn obstacle_center(obs: &Obstacle, vertices: &[Vec2]) -> Vec2 {
+    let mut sum = Vec2::ZERO;
+    let mut count = 0;
+    for e in &obs.edges {
+        sum += *e.start(vertices);
+        count += 1;
+    }
+    if count == 0 {
+        Vec2::ZERO
+    } else {
+        sum / count as f32
+    }
 }
 
 pub fn find_player_sector(player_pos: Vec2, map: &Map) -> Option<usize> {
@@ -1228,23 +1410,126 @@ mod tests {
     }
 
     #[test]
-    fn partial_overlap_rejected() {
+    fn partial_overlap_splits_wall_into_portal() {
         let assets = assets();
         let mut map = Map::default();
         rect(&mut map, &assets, 0.0, 0.0, 10.0, 10.0);
-        // Bottom edge (0,0)-(10,0) exists; this sector's bottom edge only
-        // overlaps part of it (a T-junction), which we reject.
-        let err = map.add_sector_from_polygon(
-            &[
-                Vec2::new(5.0, 0.0),
-                Vec2::new(15.0, 0.0),
-                Vec2::new(15.0, 10.0),
-                Vec2::new(5.0, 10.0),
-            ],
-            &assets,
-        );
-        assert!(err.is_err());
-        assert_eq!(map.sectors.len(), 1);
+        // A small sector to the right whose left edge only overlaps the middle
+        // of A's right wall (10,0)-(10,10): it must split that wall and form a
+        // portal on the shared sub-segment (10,4)-(10,6).
+        let b = map
+            .add_sector_from_polygon(
+                &[
+                    Vec2::new(10.0, 4.0),
+                    Vec2::new(20.0, 4.0),
+                    Vec2::new(20.0, 6.0),
+                    Vec2::new(10.0, 6.0),
+                ],
+                &assets,
+            )
+            .unwrap();
+        assert_eq!(map.sectors.len(), 2);
+
+        let a_walls = &map.sectors[0].walls;
+        assert_eq!(a_walls.len(), 6, "right wall split into three pieces");
+        let portal = a_walls
+            .iter()
+            .find(|w| w.back_side_def.is_some())
+            .expect("sector A should have a portal");
+        assert_eq!(*portal.start(&map.vertices), Vec2::new(10.0, 4.0));
+        assert_eq!(*portal.end(&map.vertices), Vec2::new(10.0, 6.0));
+        assert_eq!(portal.back_side_def.as_ref().unwrap().facing, b);
+
+        let b_walls = &map.sectors[1].walls;
+        assert_eq!(b_walls.len(), 4);
+        let b_portal = b_walls
+            .iter()
+            .find(|w| w.back_side_def.is_some())
+            .expect("sector B should have a portal");
+        assert_eq!(b_portal.back_side_def.as_ref().unwrap().facing, 0);
+        // Both sides traverse the edge in opposite directions over the same
+        // pooled vertices.
+        assert_eq!(portal.start_idx, b_portal.end_idx);
+        assert_eq!(portal.end_idx, b_portal.start_idx);
+    }
+
+    #[test]
+    fn edge_longer_than_wall_splits_new_edge() {
+        let assets = assets();
+        let mut map = Map::default();
+        rect(&mut map, &assets, 0.0, 0.0, 10.0, 10.0);
+        // A sector below A whose top edge is longer than A's bottom wall: only
+        // the shared part (5,0)-(10,0) becomes a portal; the overhang
+        // (10,0)-(15,0) stays solid.
+        let b = map
+            .add_sector_from_polygon(
+                &[
+                    Vec2::new(5.0, -5.0),
+                    Vec2::new(15.0, -5.0),
+                    Vec2::new(15.0, 0.0),
+                    Vec2::new(5.0, 0.0),
+                ],
+                &assets,
+            )
+            .unwrap();
+        assert_eq!(map.sectors.len(), 2);
+
+        let a_walls = &map.sectors[0].walls;
+        assert_eq!(a_walls.len(), 5, "bottom wall split at (5,0)");
+        let a_portal = a_walls
+            .iter()
+            .find(|w| w.back_side_def.is_some())
+            .expect("sector A should have a portal");
+        assert_eq!(*a_portal.start(&map.vertices), Vec2::new(5.0, 0.0));
+        assert_eq!(*a_portal.end(&map.vertices), Vec2::new(10.0, 0.0));
+        assert_eq!(a_portal.back_side_def.as_ref().unwrap().facing, b);
+
+        let b_walls = &map.sectors[1].walls;
+        assert_eq!(b_walls.len(), 5, "top edge split at (10,0)");
+        let b_portal = b_walls
+            .iter()
+            .find(|w| w.back_side_def.is_some())
+            .expect("sector B should have a portal");
+        assert_eq!(*b_portal.start(&map.vertices), Vec2::new(10.0, 0.0));
+        assert_eq!(*b_portal.end(&map.vertices), Vec2::new(5.0, 0.0));
+        assert_eq!(b_portal.back_side_def.as_ref().unwrap().facing, 0);
+        assert_eq!(b_walls.iter().filter(|w| w.back_side_def.is_none()).count(), 4);
+    }
+
+    #[test]
+    fn edge_spanning_two_walls_splits_both() {
+        let assets = assets();
+        let mut map = Map::default();
+        rect(&mut map, &assets, 0.0, 0.0, 10.0, 10.0);
+        rect(&mut map, &assets, 10.0, 0.0, 20.0, 10.0);
+        // A sector below both whose top edge runs across the shared corner: it
+        // overlaps A's bottom wall and B's bottom wall, so it splits into two
+        // portal pieces (one per wall) and splits both walls.
+        let c = map
+            .add_sector_from_polygon(
+                &[
+                    Vec2::new(5.0, -5.0),
+                    Vec2::new(15.0, -5.0),
+                    Vec2::new(15.0, 0.0),
+                    Vec2::new(5.0, 0.0),
+                ],
+                &assets,
+            )
+            .unwrap();
+        assert_eq!(map.sectors.len(), 3);
+
+        assert_eq!(map.sectors[0].walls.len(), 5);
+        assert_eq!(map.sectors[1].walls.len(), 5);
+
+        let c_walls = &map.sectors[c].walls;
+        assert_eq!(c_walls.len(), 5);
+        assert_eq!(c_walls.iter().filter(|w| w.back_side_def.is_some()).count(), 2);
+        let faces: Vec<usize> = c_walls
+            .iter()
+            .filter(|w| w.back_side_def.is_some())
+            .map(|w| w.back_side_def.as_ref().unwrap().facing)
+            .collect();
+        assert_eq!(faces, vec![1, 0]);
     }
 
     #[test]
@@ -1348,5 +1633,60 @@ mod tests {
             Some(Vec2::new(3.0, 3.0))
         );
         assert_eq!(snap_to_vertex(&vertices, Vec2::new(10.0, 10.0), 1.0), None);
+    }
+
+    #[test]
+    fn sector_height_setters_clamp() {
+        let assets = assets();
+        let mut map = Map::default();
+        let id = rect(&mut map, &assets, 0.0, 0.0, 10.0, 10.0);
+        let s = &mut map.sectors[id];
+
+        s.set_floor_height(5.0);
+        assert_eq!(s.floor_height, 5.0);
+        assert_eq!(s.ceiling_height, DEFAULT_CEILING_HEIGHT);
+
+        s.set_ceiling_height(2.0);
+        assert_eq!(s.ceiling_height, 5.0); // clamped up to the floor
+
+        s.set_floor_height(50.0);
+        assert_eq!(s.floor_height, 5.0); // clamped down to the ceiling
+        assert_eq!(s.ceiling_height, 5.0);
+    }
+
+    #[test]
+    fn obstacle_height_setters_clamp() {
+        let assets = assets();
+        let mut map = Map::default();
+        let id = rect(&mut map, &assets, 0.0, 0.0, 10.0, 10.0);
+        let obs = map.add_obstacle(id, 2.0, 2.0, 4.0, 4.0, &assets).unwrap();
+
+        let o = &mut map.sectors[id].obstacles[obs];
+        o.set_bottom(4.0);
+        assert_eq!(o.bottom, 4.0);
+        o.set_top(2.0);
+        assert_eq!(o.top, 4.0); // clamped up to the bottom
+        o.set_bottom(10.0);
+        assert_eq!(o.bottom, 4.0); // clamped down to the top
+    }
+
+    #[test]
+    fn point_in_polygon_and_obstacle_center() {
+        let square = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(10.0, 0.0),
+            Vec2::new(10.0, 10.0),
+            Vec2::new(0.0, 10.0),
+        ];
+        assert!(point_in_polygon(Vec2::new(5.0, 5.0), &square));
+        assert!(!point_in_polygon(Vec2::new(-1.0, 5.0), &square));
+        assert!(!point_in_polygon(Vec2::new(11.0, 5.0), &square));
+
+        let assets = assets();
+        let mut map = Map::default();
+        let id = rect(&mut map, &assets, 0.0, 0.0, 10.0, 10.0);
+        let obs = map.add_obstacle(id, 2.0, 2.0, 4.0, 4.0, &assets).unwrap();
+        let center = obstacle_center(&map.sectors[id].obstacles[obs], &map.vertices);
+        assert!((center - Vec2::new(3.0, 3.0)).length() < 1e-3);
     }
 }
