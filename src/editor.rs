@@ -6,6 +6,7 @@ use crate::map_preview::MapPreviewPlugin;
 use crate::mode::ModePlugin;
 use crate::picking::OwnPickingPlugin;
 use crate::scene::ScenePlugin;
+use crate::tools::ToolsPlugin;
 use crate::ui::UiPlugin;
 use crate::viewport::ViewportPlugin;
 
@@ -23,6 +24,7 @@ impl Plugin for EditorPlugin {
             MapHandlesPlugin,
             MapGizmosPlugin,
             MapPreviewPlugin,
+            ToolsPlugin,
         ));
     }
 }

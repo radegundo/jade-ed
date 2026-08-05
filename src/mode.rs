@@ -2,6 +2,10 @@ use bevy::camera::ScalingMode;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
+use bevy_egui::{
+    EguiContext, EguiContextSettings, EguiMultipassSchedule, EguiPrimaryContextPass,
+    PrimaryEguiContext,
+};
 
 use crate::map::Map;
 use crate::picking::state::PickingState;
@@ -79,6 +83,10 @@ fn spawn_cameras(mut commands: Commands) {
         Camera { is_active: true, ..default() },
         transform,
         fly,
+        // egui renders only for cameras with an EguiContext, so give both
+        // cameras one. The 3D camera starts as the primary (egui host).
+        EguiContext::default(),
+        PrimaryEguiContext,
     ));
 
     commands.spawn((
@@ -86,7 +94,7 @@ fn spawn_cameras(mut commands: Commands) {
         Camera2D,
         Camera { is_active: false, ..default() },
         Transform::from_xyz(5.0, 50.0, 5.0)
-            .looking_at(Vec3::new(5.0, 0.0, 5.0), Vec3::Z),
+            .looking_at(Vec3::new(5.0, 0.0, 5.0), Vec3::NEG_Z),
         Projection::Orthographic(OrthographicProjection {
             scale: 0.15,
             near: 0.1,
@@ -98,6 +106,10 @@ fn spawn_cameras(mut commands: Commands) {
         Camera2DZoom { target_scale: 0.15 },
         Camera2DEdgePan::default(),
         Visibility::Hidden,
+        // egui renders only for cameras with an EguiContext, so both cameras
+        // keep one permanently. Only the ACTIVE one carries PrimaryEguiContext
+        // (the egui host) plus its multi-pass schedule.
+        EguiContext::default(),
     ));
 }
 
@@ -108,8 +120,10 @@ fn toggle_mode(
     mut commands: Commands,
     mut mode_state: ResMut<ModeState>,
     mut drag_state: ResMut<crate::picking::drag::DragState>,
-    mut cam2d: Query<(&mut Camera, &mut Visibility), With<Camera2D>>,
-    mut cam3d: Query<(&mut Camera, &mut Visibility), (With<Camera3D>, Without<Camera2D>)>,
+    mut cam2d: Query<(Entity, &mut Camera, &mut Visibility), With<Camera2D>>,
+    mut cam3d: Query<(Entity, &mut Camera, &mut Visibility), (With<Camera3D>, Without<Camera2D>)>,
+    mut egui_settings_2d: Query<&mut EguiContextSettings, With<Camera2D>>,
+    mut egui_settings_3d: Query<&mut EguiContextSettings, (With<Camera3D>, Without<Camera2D>)>,
     mut vis2d: Query<&mut Visibility, (With<VisibleIn2D>, Without<VisibleIn3D>, Without<Camera2D>, Without<Camera3D>)>,
     mut vis3d: Query<&mut Visibility, (With<VisibleIn3D>, Without<VisibleIn2D>, Without<Camera2D>, Without<Camera3D>)>,
     dragged: Query<Entity, With<crate::picking::drag::BeingDragged>>,
@@ -136,13 +150,50 @@ fn toggle_mode(
         EditorMode::View3D => (false, true),
     };
 
-    if let Ok((mut camera, mut visibility)) = cam2d.single_mut() {
+    let mut cam2d_entity = None;
+    let mut cam3d_entity = None;
+    if let Ok((entity, mut camera, mut visibility)) = cam2d.single_mut() {
+        cam2d_entity = Some(entity);
         camera.is_active = show_2d;
         *visibility = if show_2d { Visibility::Visible } else { Visibility::Hidden };
     }
-    if let Ok((mut camera, mut visibility)) = cam3d.single_mut() {
+    if let Ok((entity, mut camera, mut visibility)) = cam3d.single_mut() {
+        cam3d_entity = Some(entity);
         camera.is_active = show_3d;
         *visibility = if show_3d { Visibility::Visible } else { Visibility::Hidden };
+    }
+
+    // The inactive camera keeps its EguiContext permanently (moving it makes
+    // bevy_egui's WindowToEguiContextMap stale and crashes
+    // capture_pointer_input_system), but its egui frame never runs. If it were
+    // allowed to capture pointer input, bevy_egui would report the (Pickable-
+    // less) camera as a pointer hit that blocks the vertex handles below it.
+    // Disable capture on the inactive camera, re-enable on the active one.
+    if let Ok(mut settings) = egui_settings_2d.single_mut() {
+        settings.capture_pointer_input = show_2d;
+    }
+    if let Ok(mut settings) = egui_settings_3d.single_mut() {
+        settings.capture_pointer_input = show_3d;
+    }
+
+    // egui renders only for the primary context's camera, so the primary
+    // marker plus its multi-pass schedule live on whichever camera is active.
+    // BOTH cameras keep an EguiContext permanently: adding/removing it makes
+    // bevy_egui's WindowToEguiContextMap stale for a frame, and
+    // capture_pointer_input_system (PostUpdate) panics on the mismatch.
+    // Commands apply atomically at the next sync point, so no frame sees two
+    // primary contexts or two contexts with the same pass schedule.
+    let (active, inactive) = match mode_state.mode {
+        EditorMode::Edit2D => (cam2d_entity, cam3d_entity),
+        EditorMode::View3D => (cam3d_entity, cam2d_entity),
+    };
+    if let (Some(active), Some(inactive)) = (active, inactive) {
+        commands
+            .entity(inactive)
+            .remove::<(PrimaryEguiContext, EguiMultipassSchedule)>();
+        commands
+            .entity(active)
+            .insert((PrimaryEguiContext, EguiMultipassSchedule::new(EguiPrimaryContextPass)));
     }
 
     for mut v in &mut vis2d {
@@ -175,6 +226,9 @@ fn control_2d_camera(
     time: Res<Time>,
     windows: Query<&Window>,
     state: Res<PickingState>,
+    tool_state: Res<crate::tools::ToolState>,
+    sector_draft: Res<crate::tools::SectorDraft>,
+    wall_draft: Res<crate::tools::WallDraft>,
 ) {
     let Ok((mut transform, mut projection, mut zoom, mut edge_pan)) = camera.single_mut() else {
         return;
@@ -194,15 +248,23 @@ fn control_2d_camera(
     let ease = 1.0 - (-12.0 * time.delta_secs()).exp();
     ortho.scale += (zoom.target_scale - ortho.scale) * ease;
 
+    // Right-click pans only when it isn't claimed by a draw tool. Middle and
+    // Space + left always pan.
+    use crate::tools::EditorTool;
+    let right_can_pan = tool_state.tool == EditorTool::Select
+        || (tool_state.tool == EditorTool::DrawSector && sector_draft.points.is_empty())
+        || (tool_state.tool == EditorTool::DrawWall && wall_draft.start.is_none());
     // Pan: middle, right, or space + left drag (Figma-style)
     let is_panning = mouse.pressed(MouseButton::Middle)
-        || mouse.pressed(MouseButton::Right)
+        || (mouse.pressed(MouseButton::Right) && right_can_pan)
         || (keys.pressed(KeyCode::Space) && mouse.pressed(MouseButton::Left));
     if is_panning && motion.delta != Vec2::ZERO {
         // 1 screen pixel = `ortho.scale` world units (ScalingMode::WindowSize),
         // so use scale directly for 1:1 grab feel (content follows the cursor).
-        transform.translation.x += motion.delta.x * ortho.scale;
-        transform.translation.z += motion.delta.y * ortho.scale;
+        // Screen-right = world +X and screen-up = world -Z now that the 2D
+        // camera is un-mirrored, so the camera moves opposite the cursor.
+        transform.translation.x -= motion.delta.x * ortho.scale;
+        transform.translation.z -= motion.delta.y * ortho.scale;
     }
 
     // Edge panning: cursor near a window edge auto-pans that way. Sign-convention
@@ -231,8 +293,8 @@ fn control_2d_camera(
         edge_pan.velocity = edge_delta;
         let dt = time.delta_secs();
         let edge_speed = 400.0 * ortho.scale;
-        transform.translation.x += edge_pan.velocity.x * edge_speed * dt;
-        transform.translation.z += edge_pan.velocity.y * edge_speed * dt;
+        transform.translation.x -= edge_pan.velocity.x * edge_speed * dt;
+        transform.translation.z -= edge_pan.velocity.y * edge_speed * dt;
     } else {
         edge_pan.velocity = Vec2::ZERO;
     }

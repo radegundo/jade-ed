@@ -1,4 +1,5 @@
 use bevy::prelude::*;
+use crate::tools::{EditorTool, ToolState};
 
 /// Attached to entity while being dragged.
 #[derive(Component)]
@@ -23,9 +24,16 @@ pub fn on_press(
     mut drag_state: ResMut<DragState>,
     state: Res<crate::picking::state::PickingState>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    meshes: Query<(), (With<Transform>, With<Mesh3d>)>
+    meshes: Query<(), (With<Transform>, With<Mesh3d>)>,
+    tool: Res<ToolState>,
 ) {
     if trigger.button != PointerButton::Primary {
+        return;
+    }
+
+    // Dragging handles only happens in Select mode; the draw/stamp tools
+    // consume clicks for their own purposes.
+    if tool.tool != EditorTool::Select {
         return;
     }
 
@@ -57,11 +65,21 @@ pub fn update_drag(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mut transforms: Query<&mut Transform>,
     dragged_query: Query<&BeingDragged>,
-    keyboard: Res<ButtonInput<KeyCode>>
+    keyboard: Res<ButtonInput<KeyCode>>,
+    tool: Res<ToolState>,
 ) {
     let Some(entity) = drag_state.entity else {
         return;
     };
+
+    // Drags are only driven in Select mode. A tool switch mid-drag aborts it.
+    if tool.tool != EditorTool::Select {
+        if let Ok(mut entity_cmds) = commands.get_entity(entity) {
+            entity_cmds.remove::<BeingDragged>();
+        }
+        *drag_state = DragState::default();
+        return;
+    }
 
     // Space + left switches to pan: abort any in-flight vertex drag so the
     // camera pan (control_2d_camera) takes over exclusively.

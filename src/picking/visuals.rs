@@ -1,5 +1,6 @@
 use bevy::prelude::*;
 use std::collections::HashMap;
+use crate::picking::drag::BeingDragged;
 
 // ── Marker Components ─────────────────────────────────────────────
 
@@ -8,12 +9,6 @@ pub struct Hovered;
 
 #[derive(Component)]
 pub struct Selected;
-
-#[derive(Component)]
-pub struct BeingDragged {
-    pub grab_offset: Vec3,
-    pub start_position: Vec3,
-}
 
 // ── Resource: stores original materials (avoids query conflicts) ──
 

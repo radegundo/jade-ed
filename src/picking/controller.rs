@@ -12,7 +12,7 @@ pub fn update_picking_state(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     interactions: Query<&PointerInteraction>,
-    mut last_cursor: Local<Vec2>
+    mut last_cursor: Local<Vec2>,
 ) {
     let Ok(window) = windows.single() else {
         return;

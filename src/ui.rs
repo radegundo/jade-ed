@@ -1,26 +1,69 @@
 use bevy::prelude::*;
-use bevy_egui::{egui, EguiContexts, EguiPlugin, EguiPrimaryContextPass};
+use bevy_egui::{egui, EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass};
 use crate::mode::{EditorMode, ModeState};
+use crate::tools::{EditorTool, ToolState};
 
 pub struct UiPlugin;
 
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins((EguiPlugin::default(),))
-            .add_systems(EguiPrimaryContextPass, editor_ui);
+        app.add_plugins((EguiPlugin::default(),));
+        // Contexts are moved between cameras by `ModePlugin::toggle_mode`, so
+        // don't let bevy_egui auto-attach a primary context to the first camera.
+        app.world_mut()
+            .resource_mut::<EguiGlobalSettings>()
+            .auto_create_primary_context = false;
+        app.add_systems(EguiPrimaryContextPass, editor_ui);
     }
 }
 
-fn editor_ui(mut contexts: EguiContexts, mode: Res<ModeState>) {
+fn editor_ui(
+    mut contexts: EguiContexts,
+    mode: Res<ModeState>,
+    mut tool_state: ResMut<ToolState>,
+) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
 
-    egui::Window::new("Mode").show(ctx, |ui| {
-        let label = match mode.mode {
+    egui::Window::new("Editor").show(ctx, |ui| {
+        let mode_label = match mode.mode {
             EditorMode::View3D => "3D View (Tab for 2D)",
             EditorMode::Edit2D => "2D Edit (Tab for 3D)",
         };
-        ui.label(label);
+        ui.label(mode_label);
+        ui.separator();
+
+        ui.horizontal(|ui| {
+            ui.label("Tool:");
+            ui.radio_value(&mut tool_state.tool, EditorTool::Select, "Select");
+            ui.radio_value(&mut tool_state.tool, EditorTool::DrawSector, "Draw Sector");
+            ui.radio_value(&mut tool_state.tool, EditorTool::DrawWall, "Draw Wall");
+            ui.radio_value(&mut tool_state.tool, EditorTool::PlaceObstacle, "Obstacle");
+        });
+
+        let hint = match tool_state.tool {
+            EditorTool::Select => "Click to select · drag to move · Delete to remove",
+            EditorTool::DrawSector => "Click to place vertices · Right-click/Enter to close · Esc to cancel",
+            EditorTool::DrawWall => "Click start then end · Right-click/Esc to cancel",
+            EditorTool::PlaceObstacle => "Drag a rectangle inside a sector",
+        };
+        ui.label(hint);
+
+        if mode.mode == EditorMode::View3D
+            && matches!(
+                tool_state.tool,
+                EditorTool::DrawSector | EditorTool::DrawWall | EditorTool::PlaceObstacle
+            )
+        {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Press Tab to switch to 2D mode to draw",
+            );
+        }
+
+        if let Some(message) = &tool_state.message {
+            ui.colored_label(egui::Color32::LIGHT_BLUE, message);
+        }
     });
 }

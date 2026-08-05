@@ -7,6 +7,7 @@ mod map_handles;
 mod map_preview;
 mod mode;
 mod scene;
+mod tools;
 mod ui;
 mod viewport;
 mod picking;

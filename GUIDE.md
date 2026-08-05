@@ -56,6 +56,7 @@ Run with `cargo run` from the project root. Launching the built binary directly
 | 2D     | Zoom                       | Scroll wheel (smoothly eased)           |
 | 2D     | Auto-pan at window edge    | Cursor near any window edge             |
 | 2D     | Drag a vertex              | Left mouse on a handle (with 1-unit snap) |
+| 2D     | Draw sector / wall / obstacle | Toolbar tools (only act in 2D mode)   |
 
 ## Module walkthrough
 
@@ -114,14 +115,34 @@ sampler** so the tiled UVs work — see "Texture tiling" below.
 - `Camera3D` / `Camera2D` tag the two cameras; `VisibleIn3D` / `VisibleIn2D` tag
   entities that should show in only one mode.
 - `spawn_cameras` creates both cameras: the 3D perspective camera from the
-  `FlyCamera` state, and a 2D orthographic camera (`ScalingMode::WindowSize`).
-  The 2D camera starts hidden (`Visibility::Hidden`).
+  `FlyCamera` state, and a 2D orthographic camera (`ScalingMode::WindowSize`)
+  looking straight down with **up = `-Z`** (un-mirrored: screen-right = world
+  `+X`, screen-up = world `-Z`). The 2D camera starts hidden
+  (`Visibility::Hidden`).
+- egui renders only for a camera that has an `EguiContext`, so **both** cameras
+  spawn with one. The 3D camera also spawns with `PrimaryEguiContext` (the egui
+  host) so it owns the UI at startup.
 - `toggle_mode` (Tab) flips the mode, restores the cursor (so a locked 3D
-  look-drag can't strand it hidden), toggles camera `is_active`/`Visibility`, and
-  **clears drag state** so a mid-drag Tab can't cause cross-mode ghost dragging.
+  look-drag can't strand it hidden), toggles camera `is_active`/`Visibility`,
+  and moves only `PrimaryEguiContext` + `EguiMultipassSchedule` to the now-active
+  camera (removing the schedule from the loser so no frame has two contexts on
+  the same pass schedule). `EguiContext` itself is **never** added/removed:
+  bevy_egui's `WindowToEguiContextMap` is only cleaned in the next PreUpdate, so
+  add/remove makes `capture_pointer_input_system` (PostUpdate) panic on the
+  stale map entry.
+- Because the inactive camera still has a stale `EguiContext`, `toggle_mode` also
+  sets `EguiContextSettings.capture_pointer_input = false` on the losing camera
+  (true on the winner). If the inactive camera were allowed to capture, its
+  `EguiContext` reports it as a pointer hit (cameras have no `Pickable`, so they
+  block everything below) and `bevy_egui`'s capture hit sits above the mesh hits
+  in picking order — the vertex handles become unhoverable and undraggable.
+- `toggle_mode` also **clears drag state** so a mid-drag Tab can't cause
+  cross-mode ghost dragging.
 - `control_2d_camera` handles zoom (scroll sets a target scale, eased each
   frame), pan (middle/right/`Space`+left, with `1 pixel = scale world units` so
-  content follows the cursor), and edge panning.
+  content follows the cursor), and edge panning. Pan signs are flipped relative
+  to a mirrored view because the 2D camera is un-mirrored: the camera moves
+  opposite the cursor to keep the grab feel.
 - `center_2d_camera_on_map` frames the map's bounding box once at startup.
 
 ### `viewport.rs` — the 3D fly camera
@@ -198,8 +219,15 @@ are despawned before respawning (`map_preview.rs:37`).
 
 ### `ui.rs`
 
-A minimal egui window showing the current mode ("3D View (Tab for 2D)" /
-"2D Edit (Tab for 3D)").
+A minimal egui toolbar (built with `EguiPrimaryContextPass`, so it follows the
+primary context to whichever camera is active): mode label ("3D View (Tab for
+2D)" / "2D Edit (Tab for 3D)"), tool radio buttons, a per-tool hint, a yellow
+reminder to press `Tab` when a draw tool is selected while in 3D view, and
+status/error messages.
+
+Draw tools only act in 2D mode: `draw_sector_tool`, `draw_wall_tool`, and
+`obstacle_stamp_tool` are gated with `in_mode(EditorMode::Edit2D)`, so clicking
+in the 3D view never creates draft points.
 
 ### `picking/` — mouse picking and dragging
 
@@ -213,7 +241,9 @@ A minimal egui window showing the current mode ("3D View (Tab for 2D)" /
 - `drag.rs` — `on_press` (observer) records a potential drag; `update_drag`
   waits until the cursor moves past a 5px threshold, computes a grab offset, then
   moves the entity each frame. On release it snaps to the grid (unless `Alt` is
-  held). `Space`+left is reserved for panning, so it aborts any in-flight drag.
+  held). Both are gated to Select tool mode (the draw/stamp tools own their
+  clicks), and `Space`+left is reserved for panning, so it aborts any in-flight
+  drag.
 - `visuals.rs` — tints hovered/selected/dragged entities (blue / orange / yellow)
   without losing the original material, using a `MaterialCache` resource.
 - `mod.rs` — `OwnPickingPlugin` wires the observers and systems, and gates
