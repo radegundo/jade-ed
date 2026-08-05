@@ -308,12 +308,15 @@ fn sync_obstacle_handles(
 }
 
 /// While an obstacle marker is being dragged, translate that obstacle's pooled
-/// vertices so the whole box follows the cursor.
+/// vertices so the whole box follows the cursor. The marker tracks the cursor,
+/// so each frame we shift the box so its center lands on the marker's current
+/// position — this is non-cumulative (adding a since-drag-start delta would
+/// accumulate and send the obstacle flying at N× cursor speed).
 fn move_dragged_obstacles(
     mut map: ResMut<Map>,
     dragged: Query<(&Transform, &BeingDragged, &ObstacleHandle)>,
 ) {
-    for (transform, drag, handle) in &dragged {
+    for (transform, _drag, handle) in &dragged {
         let Some(sector_index) = map.sectors.iter().position(|s| s.id == handle.sector_id) else {
             continue;
         };
@@ -324,12 +327,20 @@ fn move_dragged_obstacles(
         else {
             continue;
         };
-        let delta = transform.translation.xz() - drag.start_position.xz();
-        let mut idxs = Vec::new();
-        for edge in &map.sectors[sector_index].obstacles[obs_index].edges {
-            idxs.push(edge.start_idx);
-            idxs.push(edge.end_idx);
-        }
+        let (delta, idxs) = {
+            let obs = &map.sectors[sector_index].obstacles[obs_index];
+            let center = obstacle_center(obs, &map.vertices);
+            let delta = transform.translation.xz() - center;
+            // Each box corner is referenced by two edges (start of one, end of
+            // the next), so dedup before moving: applying the delta twice per
+            // corner translates the box 2× and makes it diverge.
+            let mut idxs = HashSet::new();
+            for edge in &obs.edges {
+                idxs.insert(edge.start_idx);
+                idxs.insert(edge.end_idx);
+            }
+            (delta, idxs)
+        };
         for idx in idxs {
             map.vertices[idx] += delta;
         }
