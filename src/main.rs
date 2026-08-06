@@ -12,6 +12,7 @@ mod tools;
 mod ui;
 mod viewport;
 mod picking;
+mod save;
 
 fn main() {
     App::new()

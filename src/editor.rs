@@ -10,6 +10,7 @@ use crate::scene::ScenePlugin;
 use crate::tools::ToolsPlugin;
 use crate::ui::UiPlugin;
 use crate::viewport::ViewportPlugin;
+use crate::save::SavePlugin;
 
 pub struct EditorPlugin;
 
@@ -27,6 +28,7 @@ impl Plugin for EditorPlugin {
             MapPreviewPlugin,
             HeightHandlesPlugin,
             ToolsPlugin,
+            SavePlugin,
         ));
     }
 }
