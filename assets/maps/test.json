@@ -1,0 +1,492 @@
+{
+  "version": 1,
+  "vertices": [
+    [
+      0.0,
+      0.0
+    ],
+    [
+      100.0,
+      0.0
+    ],
+    [
+      100.0,
+      40.0
+    ],
+    [
+      100.0,
+      60.0
+    ],
+    [
+      100.0,
+      100.0
+    ],
+    [
+      0.0,
+      100.0
+    ],
+    [
+      50.0,
+      40.0
+    ],
+    [
+      40.0,
+      40.0
+    ],
+    [
+      40.0,
+      50.0
+    ],
+    [
+      50.0,
+      50.0
+    ],
+    [
+      80.0,
+      70.0
+    ],
+    [
+      60.0,
+      70.0
+    ],
+    [
+      60.0,
+      90.0
+    ],
+    [
+      80.0,
+      90.0
+    ],
+    [
+      140.0,
+      40.0
+    ],
+    [
+      140.0,
+      60.0
+    ],
+    [
+      150.0,
+      13.0
+    ],
+    [
+      211.0,
+      14.0
+    ],
+    [
+      212.0,
+      101.0
+    ],
+    [
+      142.0,
+      100.0
+    ],
+    [
+      194.0,
+      38.0
+    ],
+    [
+      185.0,
+      38.0
+    ],
+    [
+      185.0,
+      29.0
+    ],
+    [
+      194.0,
+      29.0
+    ]
+  ],
+  "sectors": [
+    {
+      "walls": [
+        {
+          "start_idx": 0,
+          "end_idx": 1,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 0
+          },
+          "back": null
+        },
+        {
+          "start_idx": 1,
+          "end_idx": 2,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 0
+          },
+          "back": null
+        },
+        {
+          "start_idx": 2,
+          "end_idx": 3,
+          "front": {
+            "upper": "texture.png",
+            "middle": null,
+            "lower": "texture.png",
+            "facing": 0
+          },
+          "back": {
+            "upper": "texture.png",
+            "middle": null,
+            "lower": "texture.png",
+            "facing": 1
+          }
+        },
+        {
+          "start_idx": 3,
+          "end_idx": 4,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 0
+          },
+          "back": null
+        },
+        {
+          "start_idx": 4,
+          "end_idx": 5,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 0
+          },
+          "back": null
+        },
+        {
+          "start_idx": 5,
+          "end_idx": 0,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 0
+          },
+          "back": null
+        }
+      ],
+      "obstacles": [
+        {
+          "id": 0,
+          "edges": [
+            {
+              "start_idx": 6,
+              "end_idx": 7,
+              "front": {
+                "upper": null,
+                "middle": "texture.png",
+                "lower": null,
+                "facing": 0
+              },
+              "back": null
+            },
+            {
+              "start_idx": 7,
+              "end_idx": 8,
+              "front": {
+                "upper": null,
+                "middle": "texture.png",
+                "lower": null,
+                "facing": 0
+              },
+              "back": null
+            },
+            {
+              "start_idx": 8,
+              "end_idx": 9,
+              "front": {
+                "upper": null,
+                "middle": "texture.png",
+                "lower": null,
+                "facing": 0
+              },
+              "back": null
+            },
+            {
+              "start_idx": 9,
+              "end_idx": 6,
+              "front": {
+                "upper": null,
+                "middle": "texture.png",
+                "lower": null,
+                "facing": 0
+              },
+              "back": null
+            }
+          ],
+          "bottom": 0.0,
+          "top": 8.0,
+          "side_texture": "texture.png",
+          "top_texture": "floor_texture.png",
+          "bottom_texture": "floor_texture.png"
+        },
+        {
+          "id": 1,
+          "edges": [
+            {
+              "start_idx": 10,
+              "end_idx": 11,
+              "front": {
+                "upper": null,
+                "middle": "texture.png",
+                "lower": null,
+                "facing": 0
+              },
+              "back": null
+            },
+            {
+              "start_idx": 11,
+              "end_idx": 12,
+              "front": {
+                "upper": null,
+                "middle": "texture.png",
+                "lower": null,
+                "facing": 0
+              },
+              "back": null
+            },
+            {
+              "start_idx": 12,
+              "end_idx": 13,
+              "front": {
+                "upper": null,
+                "middle": "texture.png",
+                "lower": null,
+                "facing": 0
+              },
+              "back": null
+            },
+            {
+              "start_idx": 13,
+              "end_idx": 10,
+              "front": {
+                "upper": null,
+                "middle": "texture.png",
+                "lower": null,
+                "facing": 0
+              },
+              "back": null
+            }
+          ],
+          "bottom": 5.0,
+          "top": 7.0,
+          "side_texture": "texture.png",
+          "top_texture": "floor_texture.png",
+          "bottom_texture": "floor_texture.png"
+        }
+      ],
+      "floor_height": 0.0,
+      "ceiling_height": 20.0,
+      "floor_texture": "floor_texture.png",
+      "ceiling_texture": "floor_texture.png",
+      "id": 0
+    },
+    {
+      "walls": [
+        {
+          "start_idx": 2,
+          "end_idx": 14,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 1
+          },
+          "back": null
+        },
+        {
+          "start_idx": 14,
+          "end_idx": 15,
+          "front": {
+            "upper": "texture.png",
+            "middle": null,
+            "lower": "texture.png",
+            "facing": 1
+          },
+          "back": {
+            "upper": "texture.png",
+            "middle": null,
+            "lower": "texture.png",
+            "facing": 2
+          }
+        },
+        {
+          "start_idx": 15,
+          "end_idx": 3,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 1
+          },
+          "back": null
+        },
+        {
+          "start_idx": 3,
+          "end_idx": 2,
+          "front": {
+            "upper": "texture.png",
+            "middle": null,
+            "lower": "texture.png",
+            "facing": 1
+          },
+          "back": {
+            "upper": "texture.png",
+            "middle": null,
+            "lower": "texture.png",
+            "facing": 0
+          }
+        }
+      ],
+      "obstacles": [],
+      "floor_height": 10.0,
+      "ceiling_height": 20.0,
+      "floor_texture": "floor_texture.png",
+      "ceiling_texture": "floor_texture.png",
+      "id": 1
+    },
+    {
+      "walls": [
+        {
+          "start_idx": 16,
+          "end_idx": 17,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 2
+          },
+          "back": null
+        },
+        {
+          "start_idx": 17,
+          "end_idx": 18,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 2
+          },
+          "back": null
+        },
+        {
+          "start_idx": 18,
+          "end_idx": 19,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 2
+          },
+          "back": null
+        },
+        {
+          "start_idx": 19,
+          "end_idx": 15,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 2
+          },
+          "back": null
+        },
+        {
+          "start_idx": 15,
+          "end_idx": 14,
+          "front": {
+            "upper": "texture.png",
+            "middle": null,
+            "lower": "texture.png",
+            "facing": 2
+          },
+          "back": {
+            "upper": "texture.png",
+            "middle": null,
+            "lower": "texture.png",
+            "facing": 1
+          }
+        },
+        {
+          "start_idx": 14,
+          "end_idx": 16,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 2
+          },
+          "back": null
+        }
+      ],
+      "obstacles": [],
+      "floor_height": -4.0,
+      "ceiling_height": 23.5,
+      "floor_texture": "floor_texture.png",
+      "ceiling_texture": "floor_texture.png",
+      "id": 2
+    },
+    {
+      "walls": [
+        {
+          "start_idx": 20,
+          "end_idx": 21,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 3
+          },
+          "back": null
+        },
+        {
+          "start_idx": 21,
+          "end_idx": 22,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 3
+          },
+          "back": null
+        },
+        {
+          "start_idx": 22,
+          "end_idx": 23,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 3
+          },
+          "back": null
+        },
+        {
+          "start_idx": 23,
+          "end_idx": 20,
+          "front": {
+            "upper": null,
+            "middle": "texture.png",
+            "lower": null,
+            "facing": 3
+          },
+          "back": null
+        }
+      ],
+      "obstacles": [],
+      "floor_height": -4.0,
+      "ceiling_height": 24.0,
+      "floor_texture": "floor_texture.png",
+      "ceiling_texture": "floor_texture.png",
+      "id": 3
+    }
+  ]
+}
