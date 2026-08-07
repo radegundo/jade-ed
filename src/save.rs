@@ -13,6 +13,7 @@ use bevy::prelude::*;
 use serde::{ Deserialize, Serialize };
 
 use crate::map::*;
+use crate::textures::load_repeat;
 
 //------------------------------MAP SAVE PLUGIN----------------------
 
@@ -205,8 +206,8 @@ fn from_save(save: SaveMap, server: &AssetServer) -> Map {
                 .collect(),
             floor_height: s.floor_height,
             ceiling_height: s.ceiling_height,
-            floor_texture: server.load(&s.floor_texture),
-            ceiling_texture: server.load(&s.ceiling_texture),
+            floor_texture: load_repeat(&server, &s.floor_texture),
+            ceiling_texture: load_repeat(&server, &s.ceiling_texture),
             id: s.id,
         })
         .collect();
@@ -218,9 +219,9 @@ fn line_from_save(w: SaveLine, id: WallId, server: &AssetServer) -> LineDef {
     let side = |s: SaveSide|
         SideDef::new(
             SideDefTextures {
-                upper: s.upper.map(|t| server.load(&t)),
-                middle: s.middle.map(|t| server.load(&t)),
-                lower: s.lower.map(|t| server.load(&t)),
+                upper: s.upper.map(|t| load_repeat(&server, &t)),
+                middle: s.middle.map(|t| load_repeat(&server, &t)),
+                lower: s.lower.map(|t| load_repeat(&server, &t)),
             },
             s.facing
         );
@@ -246,9 +247,9 @@ fn obstacle_from_save(o: SaveObstacle, sector_id: usize, server: &AssetServer) -
         edges,
         bottom: o.bottom,
         top: o.top,
-        side_texture: server.load(&o.side_texture),
-        top_texture: server.load(&o.top_texture),
-        bottom_texture: server.load(&o.bottom_texture),
+        side_texture: load_repeat(&server, &o.side_texture),
+        top_texture: load_repeat(&server, &o.top_texture),
+        bottom_texture: load_repeat(&server, &o.bottom_texture),
     }
 }
 

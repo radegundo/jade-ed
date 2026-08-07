@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use crate::tools::{EditorTool, ToolState};
+use crate::tools::{EditorTool, ToolState, WallHandle};
 
 /// Attached to entity while being dragged.
 #[derive(Component)]
@@ -24,10 +24,18 @@ pub fn on_press(
     mut drag_state: ResMut<DragState>,
     state: Res<crate::picking::state::PickingState>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    meshes: Query<(), (With<Transform>, With<Mesh3d>)>,
+    // Wall handles and 3D preview walls are select-only (texture assignment);
+    // dragging them would fight the sync/respawn systems that glue them to their
+    // walls.
+    meshes: Query<(), (With<Transform>, With<Mesh3d>, Without<WallHandle>, Without<crate::map_preview::PickableWall>)>,
     tool: Res<ToolState>,
 ) {
     if trigger.button != PointerButton::Primary {
+        return;
+    }
+
+    // A press over egui belongs to the UI, not to the pickable behind it.
+    if state.pointer_over_egui {
         return;
     }
 

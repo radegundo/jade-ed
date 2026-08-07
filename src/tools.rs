@@ -57,14 +57,15 @@ pub struct ObstacleStamp {
     pub current: Vec2,
 }
 
-/// Current selection: either an entity (vertex handle / obstacle marker), a
-/// sector index, or an obstacle (sector id, obstacle id). Exactly one of the
-/// three should be set.
+/// Current selection: either an entity (vertex / obstacle / wall marker), a
+/// sector index, an obstacle (sector id, obstacle id), or a wall (sector id,
+/// wall index). Exactly one of the four should be set.
 #[derive(Resource, Default)]
 pub struct Selection {
     pub entity: Option<Entity>,
     pub sector: Option<usize>,
     pub obstacle: Option<(usize, usize)>,
+    pub wall: Option<(usize, usize)>,
 }
 
 /// Pickable marker at an obstacle's centroid, for select / drag / delete.
@@ -72,6 +73,13 @@ pub struct Selection {
 pub struct ObstacleHandle {
     pub sector_id: usize,
     pub obstacle_id: usize,
+}
+
+/// Pickable marker along a wall, for select / texture assignment.
+#[derive(Component)]
+pub struct WallHandle {
+    pub sector_id: usize,
+    pub wall_index: usize,
 }
 
 //------------------------------PLUGIN-------------------------------
@@ -97,6 +105,7 @@ impl Plugin for ToolsPlugin {
                 Update,
                 (
                     sync_obstacle_handles,
+                    sync_wall_handles,
                     move_dragged_obstacles,
                     select_click.run_if(tool_is(EditorTool::Select)),
                     delete_selected,
@@ -300,6 +309,108 @@ fn sync_obstacle_handles(
     }
 }
 
+//------------------------------WALL HANDLES-------------------------
+
+/// Transform for a pickable wall-handle cuboid: local +X lies along the wall
+/// from `start` to `end` in map coordinates (map y maps to world z).
+/// `Quat::from_rotation_y(θ)` sends local +X to `(cosθ, 0, -sinθ)`, so the
+/// angle must be `atan2(-Δy, Δx)` for the cuboid to point along the wall
+/// instead of its mirror (which would flip diagonal walls in y).
+fn wall_handle_transform(start: Vec2, end: Vec2) -> Transform {
+    let mid = (start + end) * 0.5;
+    let delta = end - start;
+    Transform {
+        translation: Vec3::new(mid.x, 0.1, mid.y),
+        rotation: Quat::from_rotation_y((-delta.y).atan2(delta.x)),
+        scale: Vec3::new(delta.length().max(0.001), 1.0, 1.0),
+    }
+}
+
+/// Spawn/update a pickable thin cuboid along every wall. Portal edges are owned
+/// by the lower-id sector (mirroring the 3D preview) so each shared edge gets
+/// exactly one handle. Handles are not draggable — they exist for select and
+/// texture assignment.
+fn sync_wall_handles(
+    mut commands: Commands,
+    map: Res<Map>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut handles: Query<(Entity, &WallHandle, &mut Transform)>,
+    mut cuboid_mesh: Local<Option<Handle<Mesh>>>,
+    mut cuboid_material: Local<Option<Handle<StandardMaterial>>>,
+) {
+    let mesh = match cuboid_mesh.as_ref() {
+        Some(h) => h.clone(),
+        None => {
+            let h = meshes.add(Cuboid::new(1.0, 0.3, 0.4));
+            *cuboid_mesh = Some(h.clone());
+            h
+        }
+    };
+    let material = match cuboid_material.as_ref() {
+        Some(h) => h.clone(),
+        None => {
+            let h = materials.add(StandardMaterial {
+                base_color: Color::srgba(0.9, 0.7, 0.2, 0.35),
+                unlit: true,
+                ..default()
+            });
+            *cuboid_material = Some(h.clone());
+            h
+        }
+    };
+
+    let mut by_key: HashMap<(usize, usize), Entity> = HashMap::new();
+    for (entity, handle, _) in &handles {
+        by_key.insert((handle.sector_id, handle.wall_index), entity);
+    }
+
+    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+    for sector in &map.sectors {
+        for (windex, wall) in sector.walls.iter().enumerate() {
+            // Only the lower-id sector owns the handle for a portal edge.
+            if let Some(back) = &wall.back_side_def
+                && sector.id >= back.facing
+            {
+                continue;
+            }
+            let key = (sector.id, windex);
+            seen.insert(key);
+
+            // Unit cuboid (local +X along the wall), scaled/rotated to match.
+            let start = *wall.start(&map.vertices);
+            let end = *wall.end(&map.vertices);
+            let target = wall_handle_transform(start, end);
+
+            match by_key.get(&key).copied() {
+                Some(entity) => {
+                    if let Ok((_, _, mut transform)) = handles.get_mut(entity)
+                        && *transform != target
+                    {
+                        *transform = target;
+                    }
+                }
+                None => {
+                    commands.spawn((
+                        WallHandle { sector_id: sector.id, wall_index: windex },
+                        Mesh3d(mesh.clone()),
+                        MeshMaterial3d(material.clone()),
+                        target,
+                        Pickable::default(),
+                        VisibleIn2D,
+                    ));
+                }
+            }
+        }
+    }
+
+    for (key, &entity) in by_key.iter() {
+        if !seen.contains(key) {
+            commands.entity(entity).despawn();
+        }
+    }
+}
+
 /// While an obstacle marker is being dragged, translate that obstacle's pooled
 /// vertices so the whole box follows the cursor. The marker tracks the cursor,
 /// so each frame we shift the box so its center lands on the marker's current
@@ -350,8 +461,14 @@ fn select_click(
     mouse: Res<ButtonInput<MouseButton>>,
     vertex_handles: Query<(Entity, &VertexHandle)>,
     obstacle_handles: Query<(Entity, &ObstacleHandle)>,
+    wall_handles: Query<(Entity, &WallHandle)>,
     mut press_pos: Local<Option<Vec2>>,
 ) {
+    // Clicks over egui are UI clicks, never selections.
+    if picking.pointer_over_egui {
+        return;
+    }
+
     if mouse.just_pressed(MouseButton::Left) {
         *press_pos = Some(picking.cursor_pos);
         return;
@@ -376,6 +493,7 @@ fn select_click(
     }
     selection.sector = None;
     selection.obstacle = None;
+    selection.wall = None;
 
     if let Some(hovered) = picking.hovered_entity {
         if let Ok((entity, _)) = vertex_handles.get(hovered) {
@@ -388,6 +506,14 @@ fn select_click(
         if let Ok((entity, handle)) = obstacle_handles.get(hovered) {
             selection.entity = Some(entity);
             selection.obstacle = Some((handle.sector_id, handle.obstacle_id));
+            if let Ok(mut e) = commands.get_entity(entity) {
+                e.insert(Selected);
+            }
+            return;
+        }
+        if let Ok((entity, handle)) = wall_handles.get(hovered) {
+            selection.entity = Some(entity);
+            selection.wall = Some((handle.sector_id, handle.wall_index));
             if let Ok(mut e) = commands.get_entity(entity) {
                 e.insert(Selected);
             }
@@ -409,6 +535,7 @@ fn delete_selected(
     keyboard: Res<ButtonInput<KeyCode>>,
     vertex_handles: Query<(Entity, &VertexHandle)>,
     obstacle_handles: Query<(Entity, &ObstacleHandle)>,
+    wall_handles: Query<(Entity, &WallHandle)>,
 ) {
     if !keyboard.just_pressed(KeyCode::Delete) && !keyboard.just_pressed(KeyCode::Backspace) {
         return;
@@ -422,6 +549,8 @@ fn delete_selected(
         } else if let Ok((_, h)) = obstacle_handles.get(entity) {
             map.remove_obstacle(h.sector_id, h.obstacle_id);
             message = Some("Obstacle deleted".to_string());
+        } else if wall_handles.get(entity).is_ok() {
+            message = Some("Wall deletion isn't supported yet".to_string());
         }
         if let Ok(mut e) = commands.get_entity(entity) {
             e.remove::<Selected>();
@@ -594,6 +723,49 @@ fn draw_tool_gizmos(
                     );
                 }
             }
+            if let Some((sector_id, wall_index)) = selection.wall
+                && let Some(sector_index) = map.sectors.iter().position(|s| s.id == sector_id)
+                && wall_index < map.sectors[sector_index].walls.len()
+            {
+                let wall = &map.sectors[sector_index].walls[wall_index];
+                let s = *wall.start(&map.vertices);
+                let e = *wall.end(&map.vertices);
+                gizmos.line(
+                    Vec3::new(s.x, 0.06, s.y),
+                    Vec3::new(e.x, 0.06, e.y),
+                    Color::srgb(1.0, 0.6, 0.1),
+                );
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wall_handle_aligns_with_wall_direction() {
+        for (start, end) in [
+            (Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0)),  // horizontal
+            (Vec2::new(0.0, 0.0), Vec2::new(0.0, 10.0)),  // vertical
+            (Vec2::new(0.0, 0.0), Vec2::new(10.0, 5.0)),  // diagonal
+            (Vec2::new(2.0, 7.0), Vec2::new(-3.0, -4.0)), // reversed diagonal
+        ] {
+            let t = wall_handle_transform(start, end);
+            let axis = t.rotation * Vec3::X;
+            let want = Vec3::new(end.x - start.x, 0.0, end.y - start.y).normalize();
+            assert!(
+                (axis - want).length() < 1e-3,
+                "handle axis {axis:?} must point along wall {want:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wall_handle_spans_the_wall_length() {
+        let t = wall_handle_transform(Vec2::new(0.0, 0.0), Vec2::new(3.0, 4.0));
+        assert!((t.scale.x - 5.0).abs() < 1e-3, "scale.x must equal wall length");
+        assert!((t.translation - Vec3::new(1.5, 0.1, 2.0)).length() < 1e-3);
     }
 }

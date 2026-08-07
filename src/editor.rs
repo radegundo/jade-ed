@@ -11,6 +11,7 @@ use crate::tools::ToolsPlugin;
 use crate::ui::UiPlugin;
 use crate::viewport::ViewportPlugin;
 use crate::save::SavePlugin;
+use crate::textures::TexturePlugin;
 
 pub struct EditorPlugin;
 
@@ -29,6 +30,7 @@ impl Plugin for EditorPlugin {
             HeightHandlesPlugin,
             ToolsPlugin,
             SavePlugin,
+            TexturePlugin,
         ));
     }
 }

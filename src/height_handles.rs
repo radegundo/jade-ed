@@ -50,9 +50,11 @@ impl Plugin for HeightHandlesPlugin {
             .add_systems(
                 Update,
                 (
-                    select_3d.run_if(in_mode(EditorMode::View3D).and_then(|s: Res<ToolState>| s.tool == EditorTool::Select)),
-                    drag_height_handles_3d.run_if(in_mode(EditorMode::View3D).and_then(|s: Res<ToolState>| s.tool == EditorTool::Select)),
-                    drag_obstacle_3d.run_if(in_mode(EditorMode::View3D).and_then(|s: Res<ToolState>| s.tool == EditorTool::Select)),
+                    // Drawing tools are 2D-only, so in 3D the active tool is
+                    // irrelevant: clicking always selects / drags.
+                    select_3d.run_if(in_mode(EditorMode::View3D)),
+                    drag_height_handles_3d.run_if(in_mode(EditorMode::View3D)),
+                    drag_obstacle_3d.run_if(in_mode(EditorMode::View3D)),
                     draw_3d_gizmos.run_if(in_mode(EditorMode::View3D)),
                 ),
             );
@@ -148,8 +150,14 @@ fn select_3d(
     state: Res<PickingState>,
     mouse: Res<ButtonInput<MouseButton>>,
     handles: Query<(Entity, &HeightHandle)>,
+    walls: Query<&crate::map_preview::PickableWall>,
     mut press_pos: Local<Option<Vec2>>,
 ) {
+    // Clicks over egui are UI clicks, never 3D selections.
+    if state.pointer_over_egui {
+        return;
+    }
+
     if mouse.just_pressed(MouseButton::Left) {
         *press_pos = Some(state.cursor_pos);
         return;
@@ -166,6 +174,34 @@ fn select_3d(
         return; // it was a drag, already handled
     }
 
+    // TEMP DEBUG: report what a 3D click resolves to.
+    {
+        let hovered_kind = match state.hovered_entity {
+            None => "none".to_string(),
+            Some(e) if walls.contains(e) => "wall".to_string(),
+            Some(e) if handles.contains(e) => "handle".to_string(),
+            Some(e) => format!("other({e:?})"),
+        };
+        let fallback = state
+            .camera_ray
+            .as_ref()
+            .and_then(|r| pick_target(r, &map))
+            .map(|p| match p {
+                PickResult::Sector(i) => format!("sector({i})"),
+                PickResult::Obstacle { sector_id, obstacle_id } => {
+                    format!("obstacle({sector_id},{obstacle_id})")
+                }
+            });
+        eprintln!(
+            "[select_3d] click over_egui={} hovered={} (entity={:?}) ray={} fallback={:?}",
+            state.pointer_over_egui,
+            hovered_kind,
+            state.hovered_entity,
+            state.camera_ray.is_some(),
+            fallback,
+        );
+    }
+
     // Clear the previous selection (and its tint marker).
     if let Some(entity) = selection.entity.take()
         && let Ok(mut e) = commands.get_entity(entity)
@@ -174,6 +210,7 @@ fn select_3d(
     }
     selection.sector = None;
     selection.obstacle = None;
+    selection.wall = None;
 
     // Clicking a height handle selects its owner.
     if let Some(hovered) = state.hovered_entity
@@ -188,6 +225,14 @@ fn select_3d(
                 selection.obstacle = Some((sector_id, obstacle_id));
             }
         }
+        return;
+    }
+
+    // Clicking a preview wall selects that wall (for texture assignment).
+    if let Some(hovered) = state.hovered_entity
+        && let Ok(wall) = walls.get(hovered)
+    {
+        selection.wall = Some((wall.sector_id, wall.wall_index));
         return;
     }
 
@@ -638,6 +683,25 @@ fn draw_3d_gizmos(mut gizmos: Gizmos, selection: Res<Selection>, map: Res<Map>) 
             );
         }
     }
+
+    // Outline the selected wall as a vertical box at its real heights.
+    if let Some((sector_id, wall_index)) = selection.wall
+        && let Some(sector_index) = sector_index_by_id(&map, sector_id)
+        && wall_index < map.sectors[sector_index].walls.len()
+    {
+        let wall = &map.sectors[sector_index].walls[wall_index];
+        let s = *wall.start(&map.vertices);
+        let e = *wall.end(&map.vertices);
+        let (lo, hi) = (
+            map.sectors[sector_index].floor_height,
+            map.sectors[sector_index].ceiling_height,
+        );
+        let color = Color::srgb(1.0, 0.6, 0.1);
+        gizmos.line(Vec3::new(s.x, lo, s.y), Vec3::new(e.x, lo, e.y), color);
+        gizmos.line(Vec3::new(s.x, hi, s.y), Vec3::new(e.x, hi, e.y), color);
+        gizmos.line(Vec3::new(s.x, lo, s.y), Vec3::new(s.x, hi, s.y), color);
+        gizmos.line(Vec3::new(e.x, lo, e.y), Vec3::new(e.x, hi, e.y), color);
+    }
 }
 
 //------------------------------TESTS---------------------------------
@@ -743,5 +807,206 @@ mod tests {
         assert!((c - before.0).length() < 1e-4, "XZ must not move");
         assert!((obs.bottom - 11.0).abs() < 1e-3);
         assert!((obs.top - 19.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn select_3d_clicking_a_wall_selects_it() {
+        use crate::map_preview::PickableWall;
+        use bevy::app::{App, Update};
+
+        let mut app = App::new();
+        app.insert_resource(Selection::default());
+        app.insert_resource(Map::default());
+        app.insert_resource(PickingState {
+            cursor_pos: Vec2::new(100.0, 100.0),
+            pointer_over_egui: false,
+            ..default()
+        });
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.add_systems(Update, select_3d);
+
+        let wall = app
+            .world_mut()
+            .spawn(PickableWall { sector_id: 0, wall_index: 3 })
+            .id();
+
+        {
+            let mut state = app.world_mut().resource_mut::<PickingState>();
+            state.hovered_entity = Some(wall);
+        }
+
+        // Press...
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+
+        // ...and release in the same spot = click.
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        app.update();
+
+        let selection = app.world_mut().resource::<Selection>();
+        assert_eq!(
+            selection.wall,
+            Some((0, 3)),
+            "clicking a hovered wall must select it"
+        );
+    }
+
+    #[test]
+    fn mesh_picking_hover_and_click_registers_wall_end_to_end() {
+        use crate::map_preview::PickableWall;
+        use crate::picking::controller::update_picking_state;
+        use bevy::app::{App, Update};
+        use bevy::camera::{primitives::Aabb, RenderTarget, RenderTargetInfo};
+        use bevy::ecs::message::Messages;
+        use bevy::picking::input::PointerInputSettings;
+        use bevy::picking::pointer::{Location, PointerId, PointerLocation};
+        use bevy::picking::prelude::*;
+        use bevy::picking::PickingSettings;
+        use bevy::window::{PrimaryWindow, Window, WindowEvent, WindowRef, WindowResolution};
+
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<bevy_egui::EguiUserTextures>();
+        app.init_resource::<Messages<WindowEvent>>();
+        app.insert_resource(ButtonInput::<MouseButton>::default());
+        app.insert_resource(ButtonInput::<KeyCode>::default());
+        app.insert_resource(PointerInputSettings {
+            is_touch_enabled: false,
+            is_mouse_enabled: true,
+        });
+        app.insert_resource(PickingSettings {
+            is_window_picking_enabled: true,
+            ..default()
+        });
+        app.insert_resource(MeshPickingSettings {
+            ray_cast_visibility: RayCastVisibility::Visible,
+            ..default()
+        });
+        app.add_plugins((DefaultPickingPlugins, MeshPickingPlugin));
+
+        app.insert_resource(Map::default());
+        app.insert_resource(ModeState::default());
+        app.insert_resource(Selection::default());
+        app.insert_resource(PickingState::default());
+        app.insert_resource(ToolState::default());
+
+        app.world_mut().spawn((
+            Window {
+                resolution: WindowResolution::new(800, 600),
+                ..default()
+            },
+            PrimaryWindow,
+        ));
+
+        // 3D camera centered on the wall's midpoint. camera_system normally
+        // fills `computed` in the real app; replicate it here headlessly.
+        // GlobalTransform is set explicitly: transform propagation systems
+        // don't run in a minimal App.
+        let cam_tf =
+            Transform::from_xyz(0.0, 3.0, 10.0).looking_at(Vec3::new(0.0, 1.0, 0.0), Vec3::Y);
+        let camera_entity = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                crate::mode::Camera3D,
+                cam_tf,
+                GlobalTransform::from(cam_tf),
+            ))
+            .id();
+        {
+            let mut cam = app.world_mut().entity_mut(camera_entity);
+            {
+                let mut projection = cam.get_mut::<Projection>().unwrap();
+                projection.update(800.0, 600.0);
+                cam.get_mut::<Camera>().unwrap().computed.clip_from_view =
+                    projection.get_clip_from_view();
+            }
+            let mut camera = cam.get_mut::<Camera>().unwrap();
+            camera.computed.target_info = Some(RenderTargetInfo {
+                physical_size: UVec2::new(800, 600),
+                scale_factor: 1.0,
+            });
+        }
+
+        // A wall quad facing the camera at world (0,1,0), spanning y 0..2.
+        let quad = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Plane3d::new(Vec3::Z, Vec2::new(1.0, 1.0)).mesh().build());
+        let wall_tf = Transform::from_xyz(0.0, 1.0, 0.0);
+        let wall = app
+            .world_mut()
+            .spawn((
+                PickableWall { sector_id: 0, wall_index: 0 },
+                Pickable::default(),
+                RayCastBackfaces,
+                Visibility::default(),
+                InheritedVisibility::VISIBLE,
+                Mesh3d(quad),
+                Aabb::from_min_max(Vec3::new(-1.0, 0.0, -0.1), Vec3::new(1.0, 2.0, 0.1)),
+                wall_tf,
+                GlobalTransform::from(wall_tf),
+            ))
+            .id();
+
+        app.add_systems(PreUpdate, update_picking_state);
+        app.add_systems(Update, select_3d);
+
+        app.update(); // Startup: PointerInputPlugin spawns the mouse pointer.
+
+        let primary = {
+            let world = app.world_mut();
+            let mut q = world.query_filtered::<Entity, With<PrimaryWindow>>();
+            q.single(&world).unwrap()
+        };
+        let pointer_entity = {
+            let world = app.world_mut();
+            let mut q = world.query::<(Entity, &PointerId)>();
+            q.iter(&world).next().unwrap().0
+        };
+        app.world_mut().entity_mut(pointer_entity).insert(PointerLocation::new(Location {
+            target: RenderTarget::Window(WindowRef::Primary).normalize(Some(primary)).unwrap(),
+            position: Vec2::new(400.0, 300.0),
+        }));
+
+        // Let hits/hover propagate through the picking pipeline.
+        app.update();
+        app.update();
+
+        {
+            let state = app.world().resource::<PickingState>();
+            assert_eq!(
+                state.hovered_entity,
+                Some(wall),
+                "hovering the wall must register it in PickingState"
+            );
+        }
+
+        // Click: press, then release in place.
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .press(MouseButton::Left);
+        app.update();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<MouseButton>>()
+            .release(MouseButton::Left);
+        app.update();
+
+        let selection = app.world().resource::<Selection>();
+        assert_eq!(
+            selection.wall,
+            Some((0, 0)),
+            "clicking the hovered wall must select it"
+        );
     }
 }

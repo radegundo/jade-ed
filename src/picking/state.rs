@@ -24,6 +24,11 @@ pub struct PickingState {
     pub just_released: bool,
     pub is_pressed: bool,
 
+    /// True when the cursor is over an egui window/panel. When set, all
+    /// click/hover data is zeroed so egui interactions never leak through to
+    /// the ground plane or the pickable entities behind the UI.
+    pub pointer_over_egui: bool,
+
     /// Cursor position in screen pixels.
     pub cursor_pos: Vec2,
     pub cursor_pos_prev: Vec2,

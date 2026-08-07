@@ -1,4 +1,5 @@
 use bevy::{ picking::pointer::PointerInteraction, prelude::* };
+use bevy_egui::EguiContexts;
 use super::state::{ PickingState, snap_to_grid };
 use crate::mode::{Camera2D, Camera3D, EditorMode, ModeState};
 
@@ -12,6 +13,7 @@ pub fn update_picking_state(
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keyboard: Res<ButtonInput<KeyCode>>,
     interactions: Query<&PointerInteraction>,
+    mut egui: EguiContexts,
     mut last_cursor: Local<Vec2>,
 ) {
     let Ok(window) = windows.single() else {
@@ -46,6 +48,41 @@ pub fn update_picking_state(
     state.ctrl_held =
         keyboard.pressed(KeyCode::ControlLeft) || keyboard.pressed(KeyCode::ControlRight);
     state.alt_held = keyboard.pressed(KeyCode::AltLeft) || keyboard.pressed(KeyCode::AltRight);
+
+    // Clicks/hovers over egui must never leak through to the ground plane or
+    // the pickable entities behind the windows: zero everything the tools act
+    // on so a click on a UI button can't also place a vertex / select a wall.
+    let over_egui = egui
+        .ctx_mut()
+        .map(|ctx| ctx.is_pointer_over_egui())
+        .unwrap_or(false);
+    state.pointer_over_egui = over_egui;
+
+    // TEMP DEBUG: report the raw pipeline state on left-click.
+    if state.just_released {
+        let nearest = interactions
+            .iter()
+            .next()
+            .and_then(|i| i.get_nearest_hit().map(|(e, _)| *e));
+        let ray_ok = camera.viewport_to_world(camera_transform, cursor_pos).is_ok();
+        eprintln!(
+            "[update_picking_state] click: over_egui={over_egui} camera_ray_ok={ray_ok} \
+             pointer_interaction_nearest={nearest:?} cursor={cursor_pos:?} mode={:?}",
+            mode.mode,
+        );
+    }
+    if over_egui {
+        state.just_pressed = false;
+        state.just_released = false;
+        state.is_pressed = false;
+        state.camera_ray = None;
+        state.ground_hit = None;
+        state.ground_hit_snapped = None;
+        state.hovered_entity = None;
+        state.mesh_hit_point = None;
+        state.mesh_hit_normal = None;
+        return;
+    }
 
     // Camera ray
     let ray = match camera.viewport_to_world(camera_transform, cursor_pos) {

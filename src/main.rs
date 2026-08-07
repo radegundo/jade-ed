@@ -13,6 +13,7 @@ mod ui;
 mod viewport;
 mod picking;
 mod save;
+mod textures;
 
 fn main() {
     App::new()

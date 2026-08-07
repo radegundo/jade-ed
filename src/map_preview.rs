@@ -8,6 +8,13 @@ use crate::mode::{EditorMode, ModeState, VisibleIn3D};
 #[derive(Component)]
 struct MapPreviewMesh;
 
+/// Pickable marker on a 3D preview wall quad, for wall selection in View3D.
+#[derive(Component)]
+pub struct PickableWall {
+    pub sector_id: usize,
+    pub wall_index: usize,
+}
+
 pub struct MapPreviewPlugin;
 
 impl Plugin for MapPreviewPlugin {
@@ -43,24 +50,12 @@ fn update_3d_preview(
     }
 
     for sector in &map.sectors {
-        for (image, mesh_data) in build_sector_meshes(sector, &map) {
+        let (buckets, walls) = build_sector_meshes(sector, &map);
+        for (image, mesh_data) in buckets {
             if mesh_data.positions.is_empty() {
                 continue;
             }
-            let mat = match material_cache.get(&image) {
-                Some(h) => h.clone(),
-                None => {
-                    let h = materials.add(StandardMaterial {
-                        base_color: Color::WHITE,
-                        base_color_texture: Some(image.clone()),
-                        perceptual_roughness: 0.9,
-                        cull_mode: None, // double-sided so walls are visible from both sides
-                        ..default()
-                    });
-                    material_cache.insert(image, h.clone());
-                    h
-                }
-            };
+            let mat = material_for_image(&mut materials, &mut material_cache, &image);
             commands.spawn((
                 MapPreviewMesh,
                 VisibleIn3D,
@@ -71,7 +66,46 @@ fn update_3d_preview(
                 MeshMaterial3d(mat),
             ));
         }
+        // Walls are individually pickable so they can be selected in 3D; each
+        // wall (and each texture region of a portal step) is its own entity.
+        for wall in walls {
+            if wall.mesh.positions.is_empty() {
+                continue;
+            }
+            let mat = material_for_image(&mut materials, &mut material_cache, &wall.image);
+            commands.spawn((
+                MapPreviewMesh,
+                PickableWall { sector_id: wall.sector_id, wall_index: wall.wall_index },
+                VisibleIn3D,
+                Pickable::default(),
+                // Raycasts cull backfaces for 3D meshes by default; walls must be
+                // clickable from both sides, so include backfaces for picking only.
+                RayCastBackfaces,
+                Mesh3d(meshes.add(wall.mesh.into_mesh())),
+                MeshMaterial3d(mat),
+            ));
+        }
     }
+}
+
+/// Get-or-add a double-sided StandardMaterial for a texture image.
+fn material_for_image(
+    materials: &mut Assets<StandardMaterial>,
+    cache: &mut HashMap<Handle<Image>, Handle<StandardMaterial>>,
+    image: &Handle<Image>,
+) -> Handle<StandardMaterial> {
+    if let Some(h) = cache.get(image) {
+        return h.clone();
+    }
+    let h = materials.add(StandardMaterial {
+        base_color: Color::WHITE,
+        base_color_texture: Some(image.clone()),
+        perceptual_roughness: 0.9,
+        cull_mode: None, // double-sided so walls are visible from both sides
+        ..default()
+    });
+    cache.insert(image.clone(), h.clone());
+    h
 }
 
 // ── Mesh building ────────────────────────────────────────────────
@@ -152,10 +186,45 @@ fn interior_normal(a: Vec2, b: Vec2) -> Vec3 {
     Vec3::new(-dz, 0.0, dx).normalize_or_zero()
 }
 
+/// A pickable wall quad for 3D selection: one mesh per texture region.
+#[derive(Default)]
+struct WallPreview {
+    sector_id: usize,
+    wall_index: usize,
+    image: Handle<Image>,
+    mesh: MeshData,
+}
+
 /// Build one mesh per texture used by a sector, so each surface can use the
 /// image assigned to it in the map data (floor, ceiling, walls, obstacles).
-fn build_sector_meshes(sector: &Sector, map: &Map) -> HashMap<Handle<Image>, MeshData> {
+/// Wall quads are also emitted as individual [`WallPreview`]s so they can be
+/// pickable entities in 3D.
+fn build_sector_meshes(
+    sector: &Sector,
+    map: &Map,
+) -> (HashMap<Handle<Image>, MeshData>, Vec<WallPreview>) {
     let mut buckets: HashMap<Handle<Image>, MeshData> = HashMap::new();
+    let mut walls: Vec<WallPreview> = Vec::new();
+
+    let add_wall = |buckets: &mut HashMap<Handle<Image>, MeshData>,
+                    walls: &mut Vec<WallPreview>,
+                    windex: usize,
+                    a: Vec2,
+                    b: Vec2,
+                    y0: f32,
+                    y1: f32,
+                    tex: &Handle<Image>| {
+        let normal = interior_normal(a, b);
+        bucket(buckets, tex).add_wall_quad(a, b, y0, y1, normal);
+        let mut mesh = MeshData::default();
+        mesh.add_wall_quad(a, b, y0, y1, normal);
+        walls.push(WallPreview {
+            sector_id: sector.id,
+            wall_index: windex,
+            image: tex.clone(),
+            mesh,
+        });
+    };
 
     // Sector outline (walls in order describe a convex polygon)
     let outline: Vec<Vec2> = sector.walls.iter().map(|w| *w.start(&map.vertices)).collect();
@@ -174,7 +243,7 @@ fn build_sector_meshes(sector: &Sector, map: &Map) -> HashMap<Handle<Image>, Mes
     // Wall quads. Portals are only built by the owner sector (the one with the
     // lower id) and only as the floor/ceiling step regions, so the shared wall
     // is rendered exactly once and the doorway stays open.
-    for wall in &sector.walls {
+    for (windex, wall) in sector.walls.iter().enumerate() {
         let a = *wall.start(&map.vertices);
         let b = *wall.end(&map.vertices);
 
@@ -191,8 +260,7 @@ fn build_sector_meshes(sector: &Sector, map: &Map) -> HashMap<Handle<Image>, Mes
             if floor_hi - floor_lo > 0.001
                 && let Some(tex) = wall.front_side_def.textures.lower.as_ref()
             {
-                bucket(&mut buckets, tex)
-                    .add_wall_quad(a, b, floor_lo, floor_hi, interior_normal(a, b));
+                add_wall(&mut buckets, &mut walls, windex, a, b, floor_lo, floor_hi, tex);
             }
 
             let ceil_lo = sector.ceiling_height.min(back_sector.ceiling_height);
@@ -200,16 +268,18 @@ fn build_sector_meshes(sector: &Sector, map: &Map) -> HashMap<Handle<Image>, Mes
             if ceil_hi - ceil_lo > 0.001
                 && let Some(tex) = wall.front_side_def.textures.upper.as_ref()
             {
-                bucket(&mut buckets, tex)
-                    .add_wall_quad(a, b, ceil_lo, ceil_hi, interior_normal(a, b));
+                add_wall(&mut buckets, &mut walls, windex, a, b, ceil_lo, ceil_hi, tex);
             }
         } else if let Some(tex) = wall.front_side_def.textures.middle.as_ref() {
-            bucket(&mut buckets, tex).add_wall_quad(
+            add_wall(
+                &mut buckets,
+                &mut walls,
+                windex,
                 a,
                 b,
                 sector.floor_height,
                 sector.ceiling_height,
-                interior_normal(a, b),
+                tex,
             );
         }
     }
@@ -227,5 +297,144 @@ fn build_sector_meshes(sector: &Sector, map: &Map) -> HashMap<Handle<Image>, Mes
         }
     }
 
-    buckets
+    (buckets, walls)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::map::MapAssets;
+    use crate::mode::ModeState;
+    use bevy::app::{App, Update};
+
+    fn map_assets() -> MapAssets {
+        MapAssets {
+            wall: Handle::default(),
+            floor: Handle::default(),
+            ceiling: Handle::default(),
+            obstacle_side: Handle::default(),
+            obstacle_top: Handle::default(),
+            obstacle_bottom: Handle::default(),
+        }
+    }
+
+    fn preview_count(app: &mut App) -> usize {
+        let world = app.world_mut();
+        world.query::<&MapPreviewMesh>().iter(world).count()
+    }
+
+    #[test]
+    fn preview_rebuilds_when_texture_changes() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.insert_resource(Map::default());
+        app.insert_resource(ModeState::default());
+        app.add_systems(Update, update_3d_preview);
+
+        // One sector in 3D mode.
+        {
+            let assets = map_assets();
+            let mut map = app.world_mut().resource_mut::<Map>();
+            map.add_sector_from_polygon(
+                &[
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(10.0, 0.0),
+                    Vec2::new(10.0, 10.0),
+                    Vec2::new(0.0, 10.0),
+                ],
+                &assets,
+            )
+            .unwrap();
+            app.world_mut().resource_mut::<ModeState>().mode = EditorMode::View3D;
+        }
+
+        app.update();
+        let first = preview_count(&mut app);
+        assert!(first > 0, "preview should spawn in 3D mode");
+
+        // Repaint the floor with a brand-new texture handle.
+        let new_tex = {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            images.add(Image::default())
+        };
+        app.world_mut().resource_mut::<Map>().sectors[0].floor_texture = new_tex.clone();
+        app.update();
+
+        // A fresh texture creates one extra bucket (floor vs. default walls),
+        // but the rebuild must REPLACE entities instead of piling them up.
+        let after = preview_count(&mut app);
+        assert!(after > first, "new floor bucket should be added");
+        app.update();
+        app.update();
+        assert_eq!(
+            preview_count(&mut app),
+            after,
+            "no-op frames must not rebuild/accumulate previews"
+        );
+
+        // Some spawned material must now reference the new floor texture.
+        let world = app.world_mut();
+        let mut q = world.query::<&MeshMaterial3d<StandardMaterial>>();
+        let handles: Vec<Handle<StandardMaterial>> = q.iter(world).map(|h| h.0.clone()).collect();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        let found = handles.iter().any(|h| {
+            materials
+                .get(h)
+                .map_or(false, |m| m.base_color_texture.as_ref() == Some(&new_tex))
+        });
+        assert!(found, "a preview material must use the new texture");
+    }
+
+    #[test]
+    fn preview_refreshes_after_2d_paint_switch_to_3d() {
+        // The now-supported workflow: paint in 2D (preview is absent), then Tab
+        // to 3D — the respawned preview must use the newly painted texture.
+        let mut app = App::new();
+        app.init_resource::<Assets<Mesh>>();
+        app.init_resource::<Assets<StandardMaterial>>();
+        app.init_resource::<Assets<Image>>();
+        app.insert_resource(Map::default());
+        app.insert_resource(ModeState::default());
+        app.add_systems(Update, update_3d_preview);
+
+        let new_tex = app.world_mut().resource_mut::<Assets<Image>>().add(Image::default());
+        {
+            let mut map = app.world_mut().resource_mut::<Map>();
+            let assets = map_assets();
+            map.add_sector_from_polygon(
+                &[
+                    Vec2::new(0.0, 0.0),
+                    Vec2::new(10.0, 0.0),
+                    Vec2::new(10.0, 10.0),
+                    Vec2::new(0.0, 10.0),
+                ],
+                &assets,
+            )
+            .unwrap();
+            map.sectors[0].floor_texture = new_tex.clone();
+        }
+
+        app.world_mut().resource_mut::<ModeState>().mode = EditorMode::Edit2D;
+        app.update();
+        assert_eq!(preview_count(&mut app), 0, "no preview in 2D mode");
+
+        app.world_mut().resource_mut::<ModeState>().mode = EditorMode::View3D;
+        app.update();
+        assert!(preview_count(&mut app) > 0, "preview respawns in 3D mode");
+
+        let world = app.world_mut();
+        let mut q = world.query::<&MeshMaterial3d<StandardMaterial>>();
+        let handles: Vec<Handle<StandardMaterial>> = q.iter(world).map(|h| h.0.clone()).collect();
+        let materials = world.resource::<Assets<StandardMaterial>>();
+        assert!(
+            handles.iter().any(|h| {
+                materials
+                    .get(h)
+                    .map_or(false, |m| m.base_color_texture.as_ref() == Some(&new_tex))
+            }),
+            "respawned preview must use the texture painted in 2D"
+        );
+    }
 }

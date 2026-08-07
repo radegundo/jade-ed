@@ -8,7 +8,6 @@ use bevy_egui::{
 };
 
 use crate::map::Map;
-use crate::picking::state::PickingState;
 
 /// Single source of truth for which mode is active.
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
@@ -43,12 +42,6 @@ pub struct VisibleIn2D;
 #[derive(Component)]
 pub struct Camera2DZoom {
     pub target_scale: f32,
-}
-
-/// Tracks 2D camera edge-pan state (cursor near a window edge auto-pans).
-#[derive(Component, Default)]
-pub struct Camera2DEdgePan {
-    pub velocity: Vec2,
 }
 
 pub struct ModePlugin;
@@ -104,7 +97,6 @@ fn spawn_cameras(mut commands: Commands) {
             ..OrthographicProjection::default_3d()
         }),
         Camera2DZoom { target_scale: 0.15 },
-        Camera2DEdgePan::default(),
         Visibility::Hidden,
         // egui renders only for cameras with an EguiContext, so both cameras
         // keep one permanently. Only the ACTIVE one carries PrimaryEguiContext
@@ -225,19 +217,17 @@ fn toggle_mode(
 // ── 2D camera controls (orthographic pan + smooth zoom) ──────────
 
 fn control_2d_camera(
-    mut camera: Query<(&mut Transform, &mut Projection, &mut Camera2DZoom, &mut Camera2DEdgePan), With<Camera2D>>,
+    mut camera: Query<(&mut Transform, &mut Projection, &mut Camera2DZoom), With<Camera2D>>,
     mouse: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     motion: Res<AccumulatedMouseMotion>,
     scroll: Res<AccumulatedMouseScroll>,
     time: Res<Time>,
-    windows: Query<&Window>,
-    state: Res<PickingState>,
     tool_state: Res<crate::tools::ToolState>,
     sector_draft: Res<crate::tools::SectorDraft>,
     wall_draft: Res<crate::tools::WallDraft>,
 ) {
-    let Ok((mut transform, mut projection, mut zoom, mut edge_pan)) = camera.single_mut() else {
+    let Ok((mut transform, mut projection, mut zoom)) = camera.single_mut() else {
         return;
     };
     let Projection::Orthographic(ref mut ortho) = *projection else {
@@ -272,38 +262,6 @@ fn control_2d_camera(
         // camera is un-mirrored, so the camera moves opposite the cursor.
         transform.translation.x -= motion.delta.x * ortho.scale;
         transform.translation.z -= motion.delta.y * ortho.scale;
-    }
-
-    // Edge panning: cursor near a window edge auto-pans that way. Sign-convention
-    // is grab-style, consistent with the drag pan above: it continues the pan
-    // gesture (camera moves opposite the content, content follows the cursor).
-    const EDGE_MARGIN: f32 = 60.0;
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let window_size = window.size();
-    let cursor = state.cursor_pos;
-
-    let mut edge_delta = Vec2::ZERO;
-    if cursor.x < EDGE_MARGIN {
-        edge_delta.x -= 1.0;
-    } else if cursor.x > window_size.x - EDGE_MARGIN {
-        edge_delta.x += 1.0;
-    }
-    if cursor.y < EDGE_MARGIN {
-        edge_delta.y -= 1.0;
-    } else if cursor.y > window_size.y - EDGE_MARGIN {
-        edge_delta.y += 1.0;
-    }
-
-    if edge_delta != Vec2::ZERO {
-        edge_pan.velocity = edge_delta;
-        let dt = time.delta_secs();
-        let edge_speed = 400.0 * ortho.scale;
-        transform.translation.x -= edge_pan.velocity.x * edge_speed * dt;
-        transform.translation.z -= edge_pan.velocity.y * edge_speed * dt;
-    } else {
-        edge_pan.velocity = Vec2::ZERO;
     }
 }
 
